@@ -20,6 +20,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { getCachedUpdateStatus } from "./update-check.mjs";
 
 const STATS_FILE = "spine-stats.json";
 const CUTS_FILE = "spine-cuts.jsonl";
@@ -428,7 +429,61 @@ export function readShadowLines({
   };
 }
 
-export function readShadowStats({ root = shadowRootDir(), conversationId = "" }) {
+export function computeWatermarkFromTranscript(transcriptPath, conversationId = "") {
+  if (!transcriptPath || !existsSync(transcriptPath)) return null;
+  let text;
+  try {
+    text = readFileSync(transcriptPath, "utf8");
+  } catch {
+    return null;
+  }
+  let plannerSteps = 0;
+  let peakContext = 0;
+  let totalInput = 0;
+  let totalCacheRead = 0;
+  let latest = null;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let rec;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (rec?.type !== "PLANNER_RESPONSE") continue;
+    const inp = Number(rec.input_tokens) || 0;
+    const cache = Number(rec.cache_read_tokens) || 0;
+    const ctx = inp + cache;
+    plannerSteps += 1;
+    totalInput += inp;
+    totalCacheRead += cache;
+    if (ctx > peakContext) peakContext = ctx;
+    latest = {
+      stepIndex: rec.step_index,
+      inputTokens: inp,
+      cacheReadTokens: cache,
+      contextTokens: ctx,
+      model: rec.model || "",
+    };
+  }
+  if (!latest) return null;
+  const totalPrompt = totalInput + totalCacheRead;
+  const cacheHitRate = totalPrompt > 0 ? Number((totalCacheRead / totalPrompt).toFixed(4)) : 0;
+  return {
+    scanVersion: 2,
+    source: "on-demand-transcript",
+    conversationId: conversationId || "",
+    updatedAt: new Date().toISOString(),
+    plannerSteps,
+    latest,
+    peakContext,
+    totalInput,
+    totalCacheRead,
+    cacheHitRate,
+  };
+}
+
+export function readShadowStats({ root = shadowRootDir(), conversationId = "", transcriptPath = "" }) {
   const readJsonSafe = (p) => {
     try {
       return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -457,7 +512,23 @@ export function readShadowStats({ root = shadowRootDir(), conversationId = "" })
   }
 
   const sessionStats = targetDir ? readJsonSafe(join(targetDir, SESSION_STATS_FILE)) : null;
-  const watermark = targetDir ? readJsonSafe(join(targetDir, "watermark.json")) : null;
+  let watermark = targetDir ? readJsonSafe(join(targetDir, "watermark.json")) : null;
+  const candidateTranscript =
+    transcriptPath ||
+    (targetConv
+      ? join(homedir(), ".gemini", "antigravity", "brain", targetConv, ".system_generated", "logs", "transcript_full.jsonl")
+      : "");
+  if (candidateTranscript && existsSync(candidateTranscript)) {
+    try {
+      const tMtime = statSync(candidateTranscript).mtimeMs;
+      const wPath = targetDir ? join(targetDir, "watermark.json") : "";
+      const wMtime = wPath && existsSync(wPath) ? statSync(wPath).mtimeMs : 0;
+      if (!watermark || tMtime > wMtime) {
+        const liveWm = computeWatermarkFromTranscript(candidateTranscript, targetConv);
+        if (liveWm) watermark = liveWm;
+      }
+    } catch {}
+  }
   const backups = targetDir
     ? listSessionFiles(targetDir).slice(0, 20).map((f) => ({
         shadowId: f.shadowId,
@@ -472,6 +543,7 @@ export function readShadowStats({ root = shadowRootDir(), conversationId = "" })
 
   return {
     shadowRoot: root,
+    updateStatus: getCachedUpdateStatus(),
     globalStats,
     conversationId: targetConv || null,
     sessionStats,

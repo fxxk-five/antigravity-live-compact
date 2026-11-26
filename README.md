@@ -45,17 +45,20 @@ mkdir -p ~/.gemini/config/plugins
 git clone https://github.com/fxxk-five/antigravity-live-compact.git ~/.gemini/config/plugins/live-compact
 ```
 
-**后续在任意电脑上拉取更新：**
+**后续在任意电脑上拉取更新（自动适配 `git clone` 与直接安装）：**
 
 ```powershell
 # Windows (PowerShell)
-git -C "$env:USERPROFILE\.gemini\config\plugins\live-compact" pull
+node "$env:USERPROFILE\.gemini\config\plugins\live-compact\scripts\update-check.mjs" --apply
 ```
 
 ```bash
 # macOS / Linux
-git -C ~/.gemini/config/plugins/live-compact pull
+node ~/.gemini/config/plugins/live-compact/scripts/update-check.mjs --apply
 ```
+
+> [!TIP]
+> **自动升级提示**：从 `v1.2.0` 起，插件通过 `SessionStart` Hook 读取本地 12 小时缓存（过期时在后台非阻塞刷新 GitHub Releases / `main/plugin.json`）。检测到新版本时，会在新对话开头直接向用户内联显示升级提示卡片（使用 `metadata.user_markdown` 且 `systemMessage=""`，**零启动阻塞、零模型 Token 消耗**）。设置 `AGY_LIVE_COMPACT_NO_UPDATE_CHECK=1` 可关闭提醒。
 
 ### 方式二：通过 `agy plugin install` 安装
 
@@ -79,7 +82,7 @@ git clone https://github.com/fxxk-five/antigravity-live-compact.git ./.agents/pl
 
 ## 验证安装与日常管理
 
-安装完成后，可执行以下命令验证插件结构与 14 项内置门禁测试：
+安装完成后，可执行以下命令验证插件结构与 20 项内置门禁测试：
 
 ```powershell
 # Windows (PowerShell)
@@ -98,7 +101,7 @@ node ~/.gemini/config/plugins/live-compact/scripts/self-test.mjs
 预期输出：
 - `agy plugin list` 显示 `live-compact` 已启用
 - `agy plugin validate --strict` 通过（`skills 1, rules 1, hooks 1, mcpServers 1`）
-- `self-test.mjs` 输出 `ALL 14 LIVE-COMPACT GATE TESTS PASSED!`
+- `self-test.mjs` 输出 `ALL 20 LIVE-COMPACT GATE TESTS PASSED!`
 
 > [!TIP]
 > 在 Antigravity App 新建一个对话并发送“查看当前 Live Compact 统计信息”，如果能正常调用 `shadow_stats` 返回会话统计，即说明 Hooks 与 MCP 均已完整生效（已打开的旧对话建议新开对话或刷新后使用）。
@@ -116,7 +119,7 @@ node ~/.gemini/config/plugins/live-compact/scripts/self-test.mjs
 ```mermaid
 flowchart LR
     A["Tool Call: run_command / read_file"] --> B{"PreToolUse Hook"}
-    B -->|"小输出 / 有行号范围读取 / 源码 <28KB / JSON <16KB"| C["原样透传 (Verbatim)"]
+    B -->|"小/中输出(<=18KB&240行) / 窄范围读(<=250行) / 常规源码(<80KB) / JSON(<32KB)"| C["原样透传 (Verbatim)"]
     B -->|"超阈值大输出 / 无范围大日志"| D["本地写入 Shadow 原文 + SHA256 校验"]
     D -->|"备份失败 (Fail-Closed)"| C
     D -->|"备份成功且净节省 >=35% 且 >=1200 chars"| E["生成 Spine Card 进入上下文"]
@@ -133,7 +136,7 @@ flowchart LR
 | **Shadow 备份** | Fail-Closed 备份至 `~/.dsh/compaction-spine/shadow/<sid>/` | Fail-Closed 原子写入 + SHA256 校验，存至 `~/.gemini/antigravity/live-compact/shadow/<convId>/` |
 | **失败诊断保护** | 预算内保留完整失败信息，不将失败命令误判为正常 | 失败命令放宽预算至 `failureBudget`（默认 `6400` 字符），精确过滤通过用例，优先保留真实失败与尾部汇总 |
 | **按需召回** | `shadow-search.js` 辅助脚本 | 内置零依赖 Stdio MCP Server（`shadow_search` / `shadow_read` / `shadow_stats`） |
-| **水位监控** | `ctx.tokenMeter.measure()` | `PreInvocation` 按字节偏移增量扫描 `transcript_full.jsonl` 统计真实 `input_tokens + cache_read_tokens`（低于 120K 静默） |
+| **水位监控** | `ctx.tokenMeter.measure()` | `shadow_stats` 按需直扫 `transcript_full.jsonl` 实时计算 `input_tokens + cache_read_tokens`（零 `PreInvocation` 同步阻塞） |
 
 ---
 
@@ -169,7 +172,7 @@ flowchart LR
 ```text
 antigravity-live-compact/
 ├── plugin.json                 # Antigravity 插件清单
-├── hooks.json                  # PreToolUse & PreInvocation 钩子声明
+├── hooks.json                  # SessionStart & PreToolUse 钩子声明
 ├── mcp_config.json             # 本地 Shadow MCP Server 配置
 ├── rules/AGENTS.md             # 指导 Agent 正确对待 Spine Card 与按需调用 shadow 工具
 ├── skills/live-compact/SKILL.md # 查看统计与阈值的内置 Skill
@@ -180,7 +183,8 @@ antigravity-live-compact/
     ├── plan.mjs                # Spine Card 确定性压缩规划器与信号提取器
     ├── shadow.mjs              # Fail-Closed 原子落盘、SHA256 校验与索引检索
     ├── mcp-server.mjs          # 零依赖 Stdio MCP Server (shadow_search/read/stats)
-    └── self-test.mjs           # 14 项端到端门禁自测
+    ├── update-check.mjs        # 后台非阻塞版本检查、SessionStart 升级提示与 --apply 一键升级
+    └── self-test.mjs           # 20 项端到端门禁自测
 ```
 
 ## 环境变量调优
@@ -190,15 +194,16 @@ antigravity-live-compact/
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `AGY_LIVE_COMPACT_DISABLED` | 未设置 | 设为 `1` 可在不卸载插件的情况下临时禁用 Hook |
-| `AGY_LIVE_COMPACT_SMALL_CHARS` | `8192` | 命令输出字符数透传阈值（同时满足行数阈值时原样透传） |
-| `AGY_LIVE_COMPACT_SMALL_LINES` | `90` | 命令输出行数透传阈值 |
+| `AGY_LIVE_COMPACT_NO_UPDATE_CHECK` | 未设置 | 设为 `1` 可关闭 `SessionStart` 自动版本更新提示 |
+| `AGY_LIVE_COMPACT_SMALL_CHARS` | `18432` | 命令输出字符数透传阈值（同时满足行数阈值时原样透传，避免压缩中小诊断脚本引发召回返工） |
+| `AGY_LIVE_COMPACT_SMALL_LINES` | `240` | 命令输出行数透传阈值 |
 | `AGY_LIVE_COMPACT_CARD_BUDGET` | `2800` | 常规输出 Spine Card 字符预算（需净压缩 >= 35% 且 >= 1200 字符才压缩） |
 | `AGY_LIVE_COMPACT_FAILURE_BUDGET` | `6400` | 失败命令 Spine Card 字符预算，优先保留错误栈与尾部汇总 |
-| `AGY_LIVE_COMPACT_LOG_MIN_BYTES` | `4096` | 无行号范围 `read_file` 读取日志/文本文件的最小压缩字节数 |
-| `AGY_LIVE_COMPACT_JSON_MIN_BYTES` | `16384` | 无行号范围 `read_file` 读取 JSON 文件的最小压缩字节数（且行数 >= 300） |
-| `AGY_LIVE_COMPACT_CODE_MIN_BYTES` | `28672` | 无行号范围 `read_file` 读取源码文件（含 `.wxml`/`.wxss`/`.wxs` 等）的最小压缩字节数（且行数 >= 600） |
-| `AGY_LIVE_COMPACT_MAX_BOUNDED_LINES` | `150` | 指定 `StartLine`/`EndLine` 且范围不超过该值时直接原样透传 |
-| `AGY_LIVE_COMPACT_WATERMARK_TOKENS` | `120000` | 真实上下文水位提醒阈值（超阈值时仅提示一次 `/compact`） |
+| `AGY_LIVE_COMPACT_LOG_MIN_BYTES` | `16384` | 无行号范围 `read_file` 读取日志/文本文件的最小压缩字节数（且行数 >= 240） |
+| `AGY_LIVE_COMPACT_JSON_MIN_BYTES` | `32768` | 无行号范围 `read_file` 读取 JSON 文件的最小压缩字节数（且行数 >= 400） |
+| `AGY_LIVE_COMPACT_CODE_MIN_BYTES` | `81920` | 无行号范围 `read_file` 读取超大源码文件的最小压缩字节数（且行数 >= 1500） |
+| `AGY_LIVE_COMPACT_MAX_BOUNDED_LINES` | `250` | 指定 `StartLine`/`EndLine` 且范围不超过该值时直接原样透传 |
+| `AGY_LIVE_COMPACT_WATERMARK_TOKENS` | `120000` | （可选，默认不启用 `PreInvocation` 同步 Hook，水位由 `shadow_stats` 按需直扫 `transcript_full.jsonl` 实时计算） |
 | `AGY_LIVE_COMPACT_SHADOW_DIR` | `~/.gemini/antigravity/live-compact/shadow` | 自定义本地 Shadow 备份根目录 |
 
 ## License

@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSpineCard, estimateTokens, isToolFailure, readConfig } from "./plan.mjs";
 import { readShadowLines, readShadowStats, saveShadowBackup, searchShadow } from "./shadow.mjs";
+import { compareVersions, evaluateUpdateNotice, saveUpdateCache } from "./update-check.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const tmp = mkdtempSync(join(tmpdir(), "agy-lc-test-"));
@@ -323,13 +324,167 @@ try {
   assert.equal(hookRun.status, 0);
   assert.equal(existsSync(staleSpec), false, "stale .cmd spec (>10m) should be auto-swept");
 
+  // 15. Windows PowerShell wrapper flushes Select-Object/Format-Table output before exit 0 and propagates cmdlet errors
+  if (process.platform === "win32") {
+    const psTableSpec = join(tmp, "spec-ps-table.json");
+    writeFileSync(
+      psTableSpec,
+      JSON.stringify({
+        cmd: `Get-ChildItem '${workDir.replace(/'/g, "''")}' | Select-Object Name, Length, LastWriteTime; Write-Output '---SEP---'; Get-ChildItem '${HERE.replace(/'/g, "''")}' | Select-Object Name`,
+        convId: "conv-ps-table",
+        callId: "call_ps_table",
+        shadowRoot: tmp,
+      }),
+    );
+    const psTableRes = spawnSync(process.execPath, [join(HERE, "live-compact-exec.mjs"), psTableSpec], {
+      encoding: "utf8",
+      env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: tmp },
+    });
+    assert.equal(psTableRes.status, 0, `ps table exited ${psTableRes.status}: ${psTableRes.stderr}`);
+    assert.ok(psTableRes.stdout.includes("huge.log"), `Select-Object output was swallowed! stdout=${JSON.stringify(psTableRes.stdout)}`);
+    assert.ok(psTableRes.stdout.includes("---SEP---"), "mixed statement separator missing");
+    assert.ok(psTableRes.stdout.includes("live-compact-exec.mjs"), "second Select-Object table missing");
+
+    const psErrSpec = join(tmp, "spec-ps-err.json");
+    writeFileSync(
+      psErrSpec,
+      JSON.stringify({
+        cmd: `Get-Item '${join(tmp, "does_not_exist_987654").replace(/'/g, "''")}'`,
+        convId: "conv-ps-err",
+        callId: "call_ps_err",
+        shadowRoot: tmp,
+      }),
+    );
+    const psErrRes = spawnSync(process.execPath, [join(HERE, "live-compact-exec.mjs"), psErrSpec], {
+      encoding: "utf8",
+      env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: tmp },
+    });
+    assert.notEqual(psErrRes.status, 0, "PowerShell non-terminating cmdlet error must preserve non-zero exit code");
+  }
+
+  // 16. Moderate diagnostic script output (~14KB / 180 lines) passes through verbatim without recall round-trips
+  const probeOut = Array.from({ length: 180 }, (_, i) => `row_${String(i + 1).padStart(3, "0")}: status=ok path=sidecar/client/module_inspector_${i}.mjs latency=${10 + i}ms payload=ok`).join("\n");
+  assert.ok(probeOut.length > 13000 && probeOut.length < 18432, `len=${probeOut.length}`);
+  const probeBuilt = buildSpineCard({
+    text: probeOut,
+    sourceType: "command",
+    sourceLabel: "node probe.mjs",
+    exitCode: 0,
+  });
+  assert.equal(probeBuilt.compacted, false, "14KB / 180-line diagnostic output must pass through verbatim");
+
+  // 17. Regular source files (<80KB / <1500 lines), output.txt (<16KB / <240 lines), and bounded reads (<=250 lines) pass through; giant source (>=80KB & >=1500 lines) compacts
+  const normalSrc = join(workDir, "normal-module.mjs");
+  writeFileSync(normalSrc, Array.from({ length: 900 }, (_, i) => `export function fn_${i}(x) { return x + ${i}; } // normal source line padding\n`).join(""), "utf8");
+  const hookNormalSrc = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({
+      hookEventName: "PreToolUse",
+      conversationId: "conv-hook-1",
+      toolCall: { id: "c_norm_src", name: "read_file", args: { Path: normalSrc } },
+    }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
+  });
+  assert.equal(JSON.parse(hookNormalSrc.stdout).overwrite, undefined, "normal ~55KB / 900-line source file must pass through verbatim");
+
+  const smallOutTxt = join(workDir, "output.txt");
+  writeFileSync(smallOutTxt, Array.from({ length: 155 }, (_, i) => `output line ${i + 1}: key=val_${i} detail=abcdefghijklmnopqrstuvwxyz0123456789\n`).join(""), "utf8");
+  const hookOutTxt = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({
+      hookEventName: "PreToolUse",
+      conversationId: "conv-hook-1",
+      toolCall: { id: "c_out_txt", name: "read_file", args: { Path: smallOutTxt } },
+    }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
+  });
+  assert.equal(JSON.parse(hookOutTxt.stdout).overwrite, undefined, "155-line output.txt must pass through verbatim");
+
+  const giantSrc = join(workDir, "giant-bundle.mjs");
+  writeFileSync(giantSrc, Array.from({ length: 1600 }, (_, i) => `export const ITEM_${i} = { idx: ${i}, label: "payload_padding_for_giant_source_file_${i}" };\n`).join(""), "utf8");
+  const hookGiantBounded = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({
+      hookEventName: "PreToolUse",
+      conversationId: "conv-hook-1",
+      toolCall: { id: "c_giant_b", name: "read_file", args: { Path: giantSrc, StartLine: 1, EndLine: 220 } },
+    }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
+  });
+  assert.equal(JSON.parse(hookGiantBounded.stdout).overwrite, undefined, "bounded read <=250 lines must pass through verbatim");
+
+  const hookGiantUnbounded = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({
+      hookEventName: "PreToolUse",
+      conversationId: "conv-hook-1",
+      toolCall: { id: "c_giant_u", name: "read_file", args: { Path: giantSrc } },
+    }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
+  });
+  assert.ok(JSON.parse(hookGiantUnbounded.stdout).overwrite?.Path?.includes("card-raw-"), "giant >=80KB / >=1500-line source read must compact");
+
+  // 18. hooks.json registers SessionStart + PreToolUse (no blocking PreInvocation) and readShadowStats computes watermark on demand
+  const hooksCfg = JSON.parse(readFileSync(join(HERE, "..", "hooks.json"), "utf8"));
+  assert.equal(hooksCfg["live-compact"].PreInvocation, undefined, "hooks.json should not register blocking PreInvocation hook");
+  assert.ok(Array.isArray(hooksCfg["live-compact"].SessionStart) && hooksCfg["live-compact"].SessionStart.length === 1, "hooks.json should register SessionStart update hook");
+  const onDemandStats = readShadowStats({ root: tmp, conversationId: "conv-exec-1", transcriptPath: fakeTranscript });
+  assert.equal(onDemandStats.watermark?.source, "on-demand-transcript");
+  assert.equal(onDemandStats.watermark?.peakContext, 128000);
+  assert.equal(onDemandStats.watermark?.plannerSteps, 2);
+
+  // 19. Semver comparison & SessionStart UI-only update notice (metadata.user_markdown, empty systemMessage)
+  assert.equal(compareVersions("1.2.1", "1.2.0"), 1);
+  assert.equal(compareVersions("v1.2.0", "1.2.0"), 0);
+  assert.equal(compareVersions("1.1.9", "1.2.0"), -1);
+  assert.equal(compareVersions("2.0.0", "2.0.0-beta.1"), 1);
+
+  const testCachePath = join(tmp, "update-check-test.json");
+  saveUpdateCache(testCachePath, {
+    checkedAtMs: Date.now(),
+    checkedAt: new Date().toISOString(),
+    repo: "fxxk-five/antigravity-live-compact",
+    source: "github-release",
+    latestVersion: "9.9.9",
+    releaseUrl: "https://github.com/fxxk-five/antigravity-live-compact/releases/tag/v9.9.9",
+    summary: "Fix PowerShell output flush and retune thresholds",
+  });
+  let spawned = false;
+  const notice = evaluateUpdateNotice({
+    cachePath: testCachePath,
+    spawnRefresh: () => { spawned = true; },
+  });
+  assert.equal(spawned, false, "fresh update cache must not spawn background refresh");
+  assert.equal(notice.showNotice, true, "higher cached version must show update notice");
+  assert.ok(notice.userMarkdown.includes("v9.9.9"), "update banner should display new version");
+
+  // 20. End-to-end SessionStart hook returns UI-only injectSteps with empty systemMessage, and respects NO_UPDATE_CHECK
+  const sessRes = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({ hookEventName: "SessionStart", conversationId: "conv-sess-1" }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_UPDATE_CACHE: testCachePath },
+  });
+  assert.equal(sessRes.status, 0);
+  const sessOut = JSON.parse(sessRes.stdout);
+  assert.equal(sessOut.injectSteps?.[0]?.systemMessage?.systemMessage, "", "SessionStart update banner must send empty systemMessage (0 LLM tokens)");
+  assert.ok(sessOut.injectSteps?.[0]?.systemMessage?.metadata?.user_markdown?.includes("v9.9.9"), "SessionStart must populate metadata.user_markdown");
+
+  const sessOptOut = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({ hookEventName: "SessionStart", conversationId: "conv-sess-2" }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_UPDATE_CACHE: testCachePath, AGY_LIVE_COMPACT_NO_UPDATE_CHECK: "1" },
+  });
+  assert.equal(sessOptOut.status, 0);
+  assert.equal(JSON.parse(sessOptOut.stdout).injectSteps, undefined, "NO_UPDATE_CHECK=1 must suppress update banner");
+
   const stats = readShadowStats({ root: tmp, conversationId: "conv-exec-1" });
   assert.equal(stats.sessionStats.cuts, 1);
+  assert.ok(stats.updateStatus && typeof stats.updateStatus.currentVersion === "string");
   assert.ok(estimateTokens("中文测试 hello world") > 0);
   assert.equal(isToolFailure("ok", false, 0), false);
   assert.equal(isToolFailure("ok", false, 1), true);
 
-  console.log("ALL 14 LIVE-COMPACT GATE TESTS PASSED!");
+  console.log("ALL 20 LIVE-COMPACT GATE TESTS PASSED!");
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

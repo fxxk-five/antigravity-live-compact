@@ -31,12 +31,13 @@ function runOriginalCommand(commandLine) {
         "$ProgressPreference = 'SilentlyContinue'",
         "try { $OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = $OutputEncoding; [Console]::InputEncoding = $OutputEncoding } catch {}",
         "$global:LASTEXITCODE = 0",
+        "$global:__lc_ok = $true",
         "& {",
         commandLine,
-        "}",
-        "$__lc_ok = $?",
+        "$global:__lc_ok = $?",
+        "} | Out-Default",
         "if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-        "if (-not $__lc_ok) { exit 1 }",
+        "if (-not $global:__lc_ok) { exit 1 }",
         "exit 0",
       ].join("\r\n");
       tempPs1 = join(tmpdir(), `agy-lc-${process.pid}-${randomBytes(6).toString("hex")}.ps1`);

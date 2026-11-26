@@ -23,6 +23,7 @@ import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSpineCard, readConfig } from "./plan.mjs";
 import { recordCutStats, saveShadowBackup, sessionShadowDir, shadowRootDir } from "./shadow.mjs";
+import { evaluateUpdateNotice } from "./update-check.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXEC_SCRIPT = join(HERE, "live-compact-exec.mjs");
@@ -408,6 +409,25 @@ function handlePreInvocation(payload, config) {
   };
 }
 
+function handleSessionStart(_payload, _config) {
+  const notice = evaluateUpdateNotice();
+  if (!notice.showNotice || !notice.userMarkdown) return {};
+  // Inject a UI-only inline markdown tip (systemMessage="" sends zero tokens to the model).
+  return {
+    injectSteps: [
+      {
+        systemMessage: {
+          systemMessage: "",
+          metadata: {
+            source: "live-compact-update",
+            user_markdown: notice.userMarkdown,
+          },
+        },
+      },
+    ],
+  };
+}
+
 async function main() {
   const raw = await readStdin();
   let payload = {};
@@ -427,6 +447,11 @@ async function main() {
   }
 
   try {
+    if (event === "SessionStart") {
+      process.stdout.write(JSON.stringify(handleSessionStart(payload, config)));
+      return;
+    }
+
     if (event === "PreToolUse") {
       const name = payload?.toolCall?.name || "";
       if (name === "run_command") {
