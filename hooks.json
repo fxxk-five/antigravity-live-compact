@@ -1,0 +1,23 @@
+{
+  "live-compact": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command|read_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/hook-dispatch.mjs",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ./scripts/hook-dispatch.mjs",
+        "timeout": 10
+      }
+    ]
+  }
+}

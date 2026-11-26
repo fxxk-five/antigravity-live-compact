@@ -1,0 +1,28 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "live-compact",
+  "displayName": "Live Compact",
+  "version": "1.1.0",
+  "description": "Deterministic in-flight context compaction for Google Antigravity: compresses verbose tool outputs and large log reads locally into Spine Cards with fail-closed shadow backups and on-demand MCP recall.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Show Live Compact stats and shadow backups for this session",
+    "Search the latest Live Compact shadow backup for errors or warnings",
+    "Explain the active Live Compact thresholds and context watermark status"
+  ],
+  "author": {
+    "name": "fxxk-five",
+    "url": "https://github.com/fxxk-five"
+  },
+  "homepage": "https://github.com/fxxk-five/antigravity-live-compact#readme",
+  "repository": "https://github.com/fxxk-five/antigravity-live-compact",
+  "license": "MIT",
+  "keywords": [
+    "live-compact",
+    "context-compaction",
+    "shadow-backup",
+    "token-optimization",
+    "antigravity",
+    "dsh-live-compact"
+  ]
+}
