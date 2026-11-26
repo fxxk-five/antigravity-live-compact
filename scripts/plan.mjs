@@ -40,8 +40,13 @@ export function readConfig(env = process.env) {
     const n = Number(raw);
     return Number.isFinite(n) && n >= min ? Math.floor(n) : fallback;
   };
+  const rawMode = String(env.AGY_LIVE_COMPACT_CMD_MODE || "smart").trim().toLowerCase();
+  const cmdMode = rawMode === "all" || rawMode === "off" || rawMode === "smart" ? rawMode : "smart";
+  const cmdExtraRegex = String(env.AGY_LIVE_COMPACT_CMD_EXTRA_REGEX || "").trim();
   return Object.freeze({
     disabled: env.AGY_LIVE_COMPACT_DISABLED === "1",
+    cmdMode,
+    cmdExtraRegex,
     smallChars: num("AGY_LIVE_COMPACT_SMALL_CHARS", 18432, 256),
     smallLines: num("AGY_LIVE_COMPACT_SMALL_LINES", 240, 5),
     cardBudget: num("AGY_LIVE_COMPACT_CARD_BUDGET", 2800, 600),
@@ -56,6 +61,52 @@ export function readConfig(env = process.env) {
     watermarkTokens: num("AGY_LIVE_COMPACT_WATERMARK_TOKENS", 120000, 10000),
     shadowMaxBytes: num("AGY_LIVE_COMPACT_SHADOW_MAX_BYTES", 256 * 1024 * 1024, 1024 * 1024),
   });
+}
+
+const HIGH_NOISE_CMD_RE =
+  /(?:^|[\s;|&`("'/\\])(?:pytest(?:\.exe)?|unittest|vitest|jest|mocha|ava|playwright|cypress|rspec|phpunit|ctest|go(?:\.exe)?\s+test|cargo(?:\.exe)?\s+(?:test|build|check|clippy|doc)|dotnet(?:\.exe)?\s+(?:test|build|publish|restore)|mvn(?:\.cmd)?\s+(?:test|verify|package|install|compile)|gradle(?:w|\.bat)?\s+(?:test|check|build|assemble)|node(?:\.exe)?\s+--test|(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?\s+(?:(?:--\S+\s+\S+|-[A-Za-z]\s+\S+)\s+)*(?:test|ci|install|pack|audit|outdated|build|run\s+(?:test|build|lint|check|verify|static|browser|self-test|e2e|typecheck)\b)|(?:pip|pip3|uv|poetry|conda)(?:\.exe)?\s+(?:install|sync|freeze|list)|(?:tsc|webpack|esbuild|rollup|turbo|nx|bazel|cmake|ninja)(?:\.cmd|\.exe)?(?:\s|$)|vite(?:\.cmd)?\s+build|next(?:\.cmd)?\s+build|nuxt(?:\.cmd)?\s+build|docker(?:\.exe)?\s+(?:build|buildx|compose|logs|pull|push)|kubectl(?:\.exe)?\s+logs|journalctl\b|(?:ruff|eslint|mypy|pyright|flake8|pylint|golangci-lint|biome)(?:\.cmd|\.exe)?(?:\s|$)|git(?:\.exe)?\s+grep\b|Get-ChildItem\b[^\r\n;|&]*-Recurse\b|dir\s+\/s\b|tree(?:\.com)?(?:\s|$))|(?:^|[\s;|&`(])make(?:\.exe)?(?:\s|$)|(?:^|[\s"'/\\-])(?:Start-DevStandalone|RebuildImage|self-test\.(?:m?js|ps1|sh)|run-all\.(?:m?js|py|ps1|sh)|emit-log\.)/i;
+
+const UNBOUNDED_LOG_DUMP_RE =
+  /(?:^|[\s;|&`(])(?:Get-Content|cat|type)\b[^\r\n;|&]*\.(?:log|jsonl)\b/i;
+
+const BOUNDED_DUMP_GUARD_RE =
+  /(?:-(?:Tail|TotalCount|First|Last)\s+[1-9]\d?\b|\|\s*(?:Select-Object\s+-(?:First|Last)\s+[1-9]\d?\b|head\b|tail\b))/i;
+
+/**
+ * Remove inline PowerShell here-string and POSIX heredoc bodies so code written
+ * to disk by a shell command does not false-trigger high-noise command matching.
+ */
+export function stripInlinePayloads(commandLine) {
+  let s = String(commandLine || "");
+  s = s.replace(/@'\r?\n[\s\S]*?\r?\n'@/g, "@''@");
+  s = s.replace(/@"\r?\n[\s\S]*?\r?\n"@/g, '@""@');
+  s = s.replace(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?[^\r\n]*\r?\n[\s\S]*?\r?\n[ \t]*\1(?=\r?\n|$)/g, "<<EOF");
+  return s;
+}
+
+/**
+ * Decide whether a `run_command` call should be wrapped via `live-compact-exec.mjs`.
+ * In default `smart` mode, only high-noise commands (test suites, builds, linters,
+ * container logs, recursive listings, `git grep`, unbounded log dumps) are wrapped;
+ * routine short commands pass through untouched with zero wrapper overhead.
+ */
+export function shouldWrapCommand(commandLine, config = readConfig()) {
+  const mode = config?.cmdMode || "smart";
+  if (mode === "off") return false;
+  if (mode === "all") return true;
+
+  const cleaned = stripInlinePayloads(commandLine).trim();
+  if (!cleaned) return false;
+  if (HIGH_NOISE_CMD_RE.test(cleaned)) return true;
+  if (UNBOUNDED_LOG_DUMP_RE.test(cleaned) && !BOUNDED_DUMP_GUARD_RE.test(cleaned)) return true;
+
+  const extra = typeof config?.cmdExtraRegex === "string" ? config.cmdExtraRegex.trim() : "";
+  if (extra) {
+    try {
+      if (new RegExp(extra, "i").test(cleaned)) return true;
+    } catch {}
+  }
+  return false;
 }
 
 export function estimateTokens(text) {

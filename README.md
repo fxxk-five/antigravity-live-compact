@@ -82,7 +82,7 @@ git clone https://github.com/fxxk-five/antigravity-live-compact.git ./.agents/pl
 
 ## 验证安装与日常管理
 
-安装完成后，可执行以下命令验证插件结构与 20 项内置门禁测试：
+安装完成后，可执行以下命令验证插件结构与 21 项内置门禁测试：
 
 ```powershell
 # Windows (PowerShell)
@@ -101,7 +101,7 @@ node ~/.gemini/config/plugins/live-compact/scripts/self-test.mjs
 预期输出：
 - `agy plugin list` 显示 `live-compact` 已启用
 - `agy plugin validate --strict` 通过（`skills 1, rules 1, hooks 1, mcpServers 1`）
-- `self-test.mjs` 输出 `ALL 20 LIVE-COMPACT GATE TESTS PASSED!`
+- `self-test.mjs` 输出 `ALL 21 LIVE-COMPACT GATE TESTS PASSED!`
 
 > [!TIP]
 > 在 Antigravity App 新建一个对话并发送“查看当前 Live Compact 统计信息”，如果能正常调用 `shadow_stats` 返回会话统计，即说明 Hooks 与 MCP 均已完整生效（已打开的旧对话建议新开对话或刷新后使用）。
@@ -184,7 +184,7 @@ antigravity-live-compact/
     ├── shadow.mjs              # Fail-Closed 原子落盘、SHA256 校验与索引检索
     ├── mcp-server.mjs          # 零依赖 Stdio MCP Server (shadow_search/read/stats)
     ├── update-check.mjs        # 后台非阻塞版本检查、SessionStart 升级提示与 --apply 一键升级
-    └── self-test.mjs           # 20 项端到端门禁自测
+    └── self-test.mjs           # 21 项端到端门禁自测
 ```
 
 ## 环境变量调优
@@ -194,6 +194,8 @@ antigravity-live-compact/
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `AGY_LIVE_COMPACT_DISABLED` | 未设置 | 设为 `1` 可在不卸载插件的情况下临时禁用 Hook |
+| `AGY_LIVE_COMPACT_CMD_MODE` | `smart` | `run_command` 包装策略：`smart`（默认）仅对测试/构建/lint/容器日志/`git grep`/递归枚举/无界日志输出等高噪音命令启用包装，常规短命令零开销原样放行；`off` 仅保留 `read_file` 压缩；`all` 全量包装 |
+| `AGY_LIVE_COMPACT_CMD_EXTRA_REGEX` | 未设置 | `smart` 模式下追加的自定义高噪音命令正则（忽略大小写），用于纳管项目特有脚本 |
 | `AGY_LIVE_COMPACT_NO_UPDATE_CHECK` | 未设置 | 设为 `1` 可关闭 `SessionStart` 自动版本更新提示 |
 | `AGY_LIVE_COMPACT_SMALL_CHARS` | `18432` | 命令输出字符数透传阈值（同时满足行数阈值时原样透传，避免压缩中小诊断脚本引发召回返工） |
 | `AGY_LIVE_COMPACT_SMALL_LINES` | `240` | 命令输出行数透传阈值 |

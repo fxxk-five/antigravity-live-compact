@@ -8,7 +8,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildSpineCard, estimateTokens, isToolFailure, readConfig } from "./plan.mjs";
+import { buildSpineCard, estimateTokens, isToolFailure, readConfig, shouldWrapCommand } from "./plan.mjs";
 import { readShadowLines, readShadowStats, saveShadowBackup, searchShadow } from "./shadow.mjs";
 import { compareVersions, evaluateUpdateNotice, saveUpdateCache } from "./update-check.mjs";
 
@@ -305,7 +305,7 @@ try {
   assert.equal(wm2.totalCacheRead, 125000);
   assert.ok(wm2.lastByteOffset > wm1.lastByteOffset);
 
-  // 14. Stale .cmd-*.json (>10min old) is swept on next PreToolUse run_command
+  // 14. Stale .cmd-*.json (>10min old) is swept on next wrapped PreToolUse run_command
   const staleDir = join(shadowDir, "conv-stale-sweep");
   mkdirSync(staleDir, { recursive: true });
   const staleSpec = join(staleDir, ".cmd-old-1234.json");
@@ -316,7 +316,7 @@ try {
     input: JSON.stringify({
       hookEventName: "PreToolUse",
       conversationId: "conv-stale-sweep",
-      toolCall: { id: "c_new", name: "run_command", args: { CommandLine: "echo hi" } },
+      toolCall: { id: "c_new", name: "run_command", args: { CommandLine: "npm test" } },
     }),
     encoding: "utf8",
     env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
@@ -477,6 +477,54 @@ try {
   assert.equal(sessOptOut.status, 0);
   assert.equal(JSON.parse(sessOptOut.stdout).injectSteps, undefined, "NO_UPDATE_CHECK=1 must suppress update banner");
 
+  // 21. Smart command gating (default cmdMode=smart) passes routine commands through untouched, wraps high-noise commands, and respects cmdMode=off/all & extra regex
+  const smartCfg = readConfig({});
+  assert.equal(smartCfg.cmdMode, "smart");
+  for (const routine of [
+    "echo hi",
+    "git status --short",
+    "git diff --check",
+    "Get-Content app.log -Tail 30",
+    "@'\nconst note = 'npm test && pytest && docker logs';\n'@ | Set-Content probe.mjs",
+    "node scripts/quick-check.mjs",
+  ]) {
+    assert.equal(shouldWrapCommand(routine, smartCfg), false, `routine cmd should pass through untouched: ${routine}`);
+  }
+  for (const noisy of [
+    "npm.cmd --prefix sidecar test",
+    "npm.cmd --prefix runtime run verify:layout",
+    "pytest -q tests/contract",
+    "docker logs legal-dsh-dev-web",
+    "git grep -n compileCitedAnswer sidecar/",
+    "Get-ChildItem -Recurse -File miniprogram",
+    "Get-Content server.log",
+    "pwsh -File runtime/scripts/dev-standalone/Start-DevStandalone.ps1 -RebuildImage",
+  ]) {
+    assert.equal(shouldWrapCommand(noisy, smartCfg), true, `high-noise cmd should be wrapped: ${noisy}`);
+  }
+
+  const runCmdHook = (cmdLine, extraEnv = {}) =>
+    JSON.parse(
+      spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+        input: JSON.stringify({
+          hookEventName: "PreToolUse",
+          conversationId: "conv-smart-gate",
+          toolCall: { id: "c_gate", name: "run_command", args: { CommandLine: cmdLine } },
+        }),
+        encoding: "utf8",
+        env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir, ...extraEnv },
+      }).stdout,
+    );
+
+  assert.equal(runCmdHook("git status --short").overwrite, undefined, "smart mode must not wrap git status");
+  assert.ok(runCmdHook("npm.cmd --prefix sidecar test").overwrite?.CommandLine?.includes("live-compact-exec.mjs"), "smart mode must wrap npm test");
+  assert.equal(runCmdHook("npm.cmd --prefix sidecar test", { AGY_LIVE_COMPACT_CMD_MODE: "off" }).overwrite, undefined, "cmdMode=off must pass through even npm test");
+  assert.ok(runCmdHook("echo hi", { AGY_LIVE_COMPACT_CMD_MODE: "all" }).overwrite?.CommandLine?.includes("live-compact-exec.mjs"), "cmdMode=all must wrap echo hi");
+  assert.ok(
+    runCmdHook("node custom_acceptance_runner.mjs", { AGY_LIVE_COMPACT_CMD_EXTRA_REGEX: "custom_acceptance_runner" }).overwrite?.CommandLine?.includes("live-compact-exec.mjs"),
+    "AGY_LIVE_COMPACT_CMD_EXTRA_REGEX must opt-in custom noisy commands",
+  );
+
   const stats = readShadowStats({ root: tmp, conversationId: "conv-exec-1" });
   assert.equal(stats.sessionStats.cuts, 1);
   assert.ok(stats.updateStatus && typeof stats.updateStatus.currentVersion === "string");
@@ -484,7 +532,7 @@ try {
   assert.equal(isToolFailure("ok", false, 0), false);
   assert.equal(isToolFailure("ok", false, 1), true);
 
-  console.log("ALL 20 LIVE-COMPACT GATE TESTS PASSED!");
+  console.log("ALL 21 LIVE-COMPACT GATE TESTS PASSED!");
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

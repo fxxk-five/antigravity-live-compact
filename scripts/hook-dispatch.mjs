@@ -21,7 +21,7 @@ import {
 } from "node:fs";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildSpineCard, readConfig } from "./plan.mjs";
+import { buildSpineCard, readConfig, shouldWrapCommand } from "./plan.mjs";
 import { recordCutStats, saveShadowBackup, sessionShadowDir, shadowRootDir } from "./shadow.mjs";
 import { evaluateUpdateNotice } from "./update-check.mjs";
 
@@ -76,6 +76,8 @@ function handleRunCommand(payload, config) {
   if (args.IsDaemon === true) return { decision: "allow" };
   // Never double-wrap our own runner.
   if (cmd.includes("live-compact-exec.mjs")) return { decision: "allow" };
+  // Pass routine low-noise commands through untouched to avoid unnecessary wrapper overhead.
+  if (!shouldWrapCommand(cmd, config)) return { decision: "allow" };
 
   const root = shadowRootDir();
   const convId = payload.conversationId || "default";

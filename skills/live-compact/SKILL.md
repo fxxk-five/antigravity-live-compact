@@ -18,6 +18,8 @@ Use the bundled `shadow` MCP server tools (`shadow_stats`, `shadow_search`, `sha
 ## Environment Knobs
 
 - `AGY_LIVE_COMPACT_DISABLED=1`: Temporarily bypass all Live Compact hooks.
+- `AGY_LIVE_COMPACT_CMD_MODE` (`smart` default | `all` | `off`): Controls `run_command` wrapping. `smart` only wraps high-noise commands (test suites, builds, linters, container logs, `git grep`, recursive scans, unbounded `.log`/`.jsonl` dumps) so routine short commands pass through with zero wrapper overhead; `off` disables command wrapping while keeping `read_file` compaction active; `all` wraps all non-daemon commands.
+- `AGY_LIVE_COMPACT_CMD_EXTRA_REGEX`: Optional case-insensitive regex to include extra project-specific high-noise commands in `smart` mode.
 - `AGY_LIVE_COMPACT_NO_UPDATE_CHECK=1`: Disable the non-blocking `SessionStart` update check banner.
 - `AGY_LIVE_COMPACT_SMALL_CHARS` (default `18432`) / `AGY_LIVE_COMPACT_SMALL_LINES` (default `240`): Command outputs within both limits pass through 100% verbatim to avoid unnecessary recall round-trips on compact diagnostic scripts and snapshots.
 - `AGY_LIVE_COMPACT_CARD_BUDGET` (default `2800`) / `AGY_LIVE_COMPACT_FAILURE_BUDGET` (default `6400`): Character budgets for compacted Spine Cards (requires >= 35% real reduction).
