@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSpineCard, estimateTokens, isToolFailure, readConfig, shouldWrapCommand } from "./plan.mjs";
+import { analyzeConversation, prepareAndMaybeLaunchRelay } from "./relay.mjs";
 import { readShadowLines, readShadowStats, saveShadowBackup, searchShadow } from "./shadow.mjs";
 import { compareVersions, evaluateUpdateNotice, saveUpdateCache } from "./update-check.mjs";
 
@@ -153,7 +154,13 @@ try {
   assert.equal(mcpRes.status, 0, `mcp exited ${mcpRes.status}: ${mcpRes.stderr}`);
   const replies = mcpRes.stdout.trim().split("\n").map((l) => JSON.parse(l));
   assert.equal(replies.length, 4);
-  assert.equal(replies[1].result.tools.length, 3);
+  assert.ok(replies[0].result.capabilities.resources, "MCP initialize must advertise resources capability for MCP App");
+  assert.equal(replies[1].result.tools.length, 9);
+  const modelVisibleTools = replies[1].result.tools.filter((t) => {
+    const vis = t._meta?.ui?.visibility;
+    return !vis || vis.includes("model");
+  });
+  assert.equal(modelVisibleTools.length, 5, "5 tools should be visible to model (3 shadow + context_doctor + prepare_handoff)");
   assert.ok(replies[2].result.content[0].text.includes("latency_9876ms"));
   assert.ok(replies[3].result.content[0].text.includes('"cuts": 1'));
 
@@ -610,6 +617,200 @@ try {
     "rules/AGENTS.md must inline MCP tool schemas to avoid schema-read turns",
   );
 
+  // 23. v2.0 Clean-Slate Session Relay engine: deterministic autopsy, 3-slot semantic brief, cross-session shadowId inheritance, and ConversationService launch
+  const fakeAppDir = join(tmp, "fake-app");
+  const relayConvId = "deadbeef-1111-2222-3333-444455556666";
+  const relayLogDir = join(fakeAppDir, "brain", relayConvId, ".system_generated", "logs");
+  mkdirSync(relayLogDir, { recursive: true });
+
+  const relayBackup = saveShadowBackup({
+    root: shadowDir,
+    conversationId: relayConvId,
+    toolName: "run_command",
+    callId: "call_relay_1",
+    sourceType: "command",
+    sourceLabel: "npm.cmd --prefix sidecar test",
+    exitCode: 1,
+    rawText: "PASS suite 1\nAssertionError: relay_cold_memory_needle_7788\nFAILED suite 2\n",
+  });
+  assert.equal(relayBackup.ok, true);
+
+  const syntheticSteps = [
+    {
+      step_index: 0,
+      type: "USER_INPUT",
+      created_at: "2026-11-27T01:00:00Z",
+      content: "<USER_REQUEST>\nFix T1/T2 deliverables citation rendering and pass WI-0044 gate.\n</USER_REQUEST>",
+    },
+    {
+      step_index: 1,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      model: "gemini-4-carbon-high",
+      created_at: "2026-11-27T01:00:02Z",
+      input_tokens: 18000,
+      cache_read_tokens: 0,
+      output_tokens: 400,
+      tool_calls: [
+        { name: "read_file", args: { Path: "d:/repo/AGENTS.md", StartLine: 1, EndLine: 50 } },
+        { name: "read_file", args: { Path: "d:/repo/sidecar/client/index.mjs", StartLine: 1, EndLine: 200 } },
+      ],
+    },
+    { step_index: 2, type: "GENERIC", created_at: "2026-11-27T01:00:12Z", content: "Showing lines 1-50 of 50\n# Project Rules\n" },
+    { step_index: 3, type: "GENERIC", created_at: "2026-11-27T01:00:13Z", content: "Showing lines 1-200 of 900\n" + "x".repeat(9000) },
+    {
+      step_index: 4,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      model: "gemini-4-carbon-high",
+      created_at: "2026-11-27T01:05:00Z",
+      input_tokens: 8000,
+      cache_read_tokens: 150000,
+      output_tokens: 900,
+      tool_calls: [
+        { name: "edit_file", args: { Path: "d:/repo/sidecar/client/index.mjs", Target: "a", Replacement: "b" } },
+        {
+          name: "update_steps",
+          args: {
+            steps: [
+              { title: "Patch citation renderer", status: "done" },
+              { title: "Run full frontend gate", status: "in_progress" },
+            ],
+          },
+        },
+      ],
+    },
+    { step_index: 5, type: "GENERIC", created_at: "2026-11-27T01:05:14Z", content: "Made 1 replacement." },
+    { step_index: 6, type: "GENERIC", created_at: "2026-11-27T01:05:14Z", content: "OK" },
+    {
+      step_index: 7,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      model: "gemini-4-carbon-high",
+      created_at: "2026-11-27T01:15:00Z",
+      input_tokens: 6000,
+      cache_read_tokens: 305000,
+      output_tokens: 600,
+      content: "Running sidecar test suite to verify citation fix.",
+      tool_calls: [
+        { name: "run_command", args: { CommandLine: "npm.cmd --prefix sidecar test", toolSummary: "Run sidecar tests" } },
+      ],
+    },
+    {
+      step_index: 8,
+      type: "GENERIC",
+      created_at: "2026-11-27T01:16:08Z",
+      content: `Command exited with code 1.\n[Live Compact · Spine Card] (exit=1 FAILED)\nShadow: id=${relayBackup.shadowId} | conv=${relayConvId}\nAssertionError: relay_cold_memory_needle_7788`,
+    },
+  ];
+  writeFileSync(
+    join(relayLogDir, "transcript_full.jsonl"),
+    syntheticSteps.map((s) => JSON.stringify(s)).join("\n") + "\n",
+    "utf8",
+  );
+
+  const docRes = analyzeConversation("deadbeef", { appDir: fakeAppDir, shadowRoot: shadowDir, includeGitStatus: false });
+  assert.equal(docRes.report.conversationId, relayConvId);
+  assert.equal(docRes.report.verdict.level, "CRITICAL", "311k context must trigger CRITICAL relay verdict");
+  assert.equal(docRes.report.handoff.modifiedFiles.length, 1);
+  assert.equal(docRes.report.handoff.staleReadCalls, undefined);
+  assert.equal(docRes.report.redundancy.staleReadCalls, 1, "initial read before edit_file must be counted as stale");
+  assert.ok(docRes.handoffBrief.includes("AGENTS.md"), "handoff brief must retain governance doc pointer");
+  assert.ok(docRes.handoffBrief.includes(relayBackup.shadowId), "handoff brief must inherit shadowId pointer");
+  assert.ok(docRes.handoffBrief.includes("Run full frontend gate"), "handoff brief must retain unfinished step");
+
+  const rpcCalls = [];
+  const mockFetcher = async (url, init) => {
+    const body = JSON.parse(init.body || "{}");
+    rpcCalls.push({ url, body });
+    if (url.endsWith("/GetConversation")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: relayConvId,
+          metadata: { projectId: "proj-legal-14ca" },
+          annotations: { title: "[R1] WI-0044 Citation Fix" },
+        }),
+      };
+    }
+    if (url.endsWith("/CreateConversation")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ conversation: { id: "newconv-9999-8888-7777-666655554444" } }),
+      };
+    }
+    if (url.endsWith("/UpdateConversation")) {
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    return { ok: false, status: 404, text: async () => "not found" };
+  };
+
+  const launched = await prepareAndMaybeLaunchRelay({
+    conversationId: relayConvId,
+    nextAction: "Fix off-by-one index in sidecar/client/index.mjs and re-run sidecar test.",
+    hypothesis: "claimSourceKey stripped trailing punctuation on Q2.",
+    redlines: "Never touch real case database.",
+    launchNewConversation: true,
+    archiveSource: true,
+    appDir: fakeAppDir,
+    shadowRoot: shadowDir,
+    env: { ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:22088", ANTIGRAVITY_CSRF_TOKEN: "csrf-test" },
+    fetcher: mockFetcher,
+  });
+  assert.equal(launched.launched, true);
+  assert.equal(launched.newConversationId, "newconv-9999-8888-7777-666655554444");
+  assert.equal(launched.archivedSource, true);
+  const createCall = rpcCalls.find((c) => c.url.endsWith("/CreateConversation"));
+  assert.equal(createCall.body.projectId, "proj-legal-14ca", "new relay conversation must inherit source projectId");
+  assert.ok(createCall.body.prompt[0].text.includes("claimSourceKey stripped trailing punctuation"));
+
+  // Verify the new conversation can recall the old session's shadow backup purely by shadowId!
+  const crossRecall = searchShadow({
+    root: shadowDir,
+    conversationId: "newconv-9999-8888-7777-666655554444",
+    shadowId: relayBackup.shadowId,
+    pattern: "relay_cold_memory_needle_7788",
+  });
+  assert.equal(crossRecall.found, true, "new relay session must recall old session shadowId seamlessly");
+  assert.equal(crossRecall.totalMatches, 1);
+
+  // 24. MCP App resources/list, resources/read (`ui://live-compact/relay.html`), context_doctor & app-only tools
+  const mcpV2In = [
+    JSON.stringify({ jsonrpc: "2.0", id: 10, method: "resources/list", params: {} }),
+    JSON.stringify({ jsonrpc: "2.0", id: 11, method: "resources/read", params: { uri: "ui://live-compact/relay.html" } }),
+    JSON.stringify({ jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "context_doctor", arguments: { conversationId: relayConvId } } }),
+    JSON.stringify({ jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "app_list_sessions", arguments: { limit: 5 } } }),
+  ].join("\n") + "\n";
+
+  const mcpV2Res = spawnSync(process.execPath, [join(HERE, "mcp-server.mjs")], {
+    input: mcpV2In,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ANTIGRAVITY_APP_DATA_DIR: fakeAppDir,
+      AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir,
+      ANTIGRAVITY_LS_ADDRESS: "",
+    },
+  });
+  assert.equal(mcpV2Res.status, 0, `mcp v2 exited ${mcpV2Res.status}: ${mcpV2Res.stderr}`);
+  const v2Replies = new Map(
+    mcpV2Res.stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+      .map((r) => [r.id, r]),
+  );
+  assert.equal(v2Replies.get(10)?.result?.resources?.[0]?.uri, "ui://live-compact/relay.html");
+  assert.equal(v2Replies.get(10)?.result?.resources?.[0]?.mimeType, "text/html;profile=mcp-app");
+  const appHtml = v2Replies.get(11)?.result?.contents?.[0]?.text || "";
+  assert.ok(appHtml.length > 15000, `bundled MCP App HTML should embed SDK (>15KB), got ${appHtml.length}`);
+  assert.ok(appHtml.includes("Live Compact Relay") && appHtml.includes("ui/initialize"), "bundled HTML must contain UI & SEP-1865 handshake");
+  assert.equal(v2Replies.get(12)?.result?.structuredContent?.report?.conversationId, relayConvId);
+  assert.equal(v2Replies.get(13)?.result?.structuredContent?.sessions?.[0]?.conversationId, relayConvId);
+
   const stats = readShadowStats({ root: tmp, conversationId: "conv-exec-1" });
   assert.equal(stats.sessionStats.cuts, 1);
   assert.ok(stats.updateStatus && typeof stats.updateStatus.currentVersion === "string");
@@ -617,7 +818,7 @@ try {
   assert.equal(isToolFailure("ok", false, 0), false);
   assert.equal(isToolFailure("ok", false, 1), true);
 
-  console.log("ALL 22 LIVE-COMPACT GATE TESTS PASSED!");
+  console.log("ALL 24 LIVE-COMPACT GATE TESTS PASSED!");
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

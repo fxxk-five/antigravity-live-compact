@@ -11,9 +11,11 @@ description: >-
 Use the bundled `shadow` MCP server tools (`shadow_stats`, `shadow_search`, `shadow_read`) to inspect compression activity for the current or recent sessions:
 
 1. Call `shadow_stats` to view total cuts, raw vs compacted bytes, estimated tokens saved, update status, and the list of archived shadow backups.
-2. When locating a specific detail in a compressed log or command output, call `shadow_search` with the `shadowId` and a focused keyword or regex pattern.
-3. Call `shadow_read` with bounded `startLine` and `endLine` (<= 150 lines) only when surrounding lines are needed.
-4. When the user asks to check or upgrade Live Compact, run `node "$env:USERPROFILE\.gemini\config\plugins\live-compact\scripts\update-check.mjs" --check` (or `--apply` to upgrade in place and run all gate tests).
+2. Call `context_doctor` to audit a session's context watermark, turn-latency degradation, and duplicate/stale `read_file` payload, and to open the interactive **Live Compact Relay** panel in the side pane.
+3. When a conversation crosses ~180k–220k tokens (or the user asks for a clean handoff), call `prepare_handoff` with concise `nextAction`, `hypothesis`, and `redlines` slots (set `launchNewConversation: true` if the user wants to immediately start the fresh session). The new session inherits all `shadowId` cold-memory pointers automatically.
+4. When locating a specific detail in a compressed log or command output, call `shadow_search` with the `shadowId` and a focused keyword or regex pattern.
+5. Call `shadow_read` with bounded `startLine` and `endLine` (<= 150 lines) only when surrounding lines are needed.
+6. When the user asks to check or upgrade Live Compact, run `node "$env:USERPROFILE\.gemini\config\plugins\live-compact\scripts\update-check.mjs" --check` (or `--apply` to upgrade in place and run all gate tests).
 
 ## Environment Knobs
 

@@ -15,3 +15,5 @@ Call `call_mcp_tool` directly with `ServerName: "live-compact_shadow"` using the
 - **`shadow_search`**: `{ pattern: string, shadowId?: string, conversationId?: string, regex?: boolean, ignoreCase?: boolean, contextLines?: 0..5, limit?: 1..100 }` (`pattern` required).
 - **`shadow_read`**: `{ shadowId: string, conversationId?: string, startLine?: integer, endLine?: integer }` (`shadowId` required; 1-based inclusive, max 150 lines/call).
 - **`shadow_stats`**: `{ conversationId?: string }` (all fields optional; returns cuts, saved tokens, and real-time context watermark).
+- **`context_doctor`**: `{ conversationId?: string }` (audits context watermark, turn-latency inflation, duplicate/stale read waste, and opens the **Live Compact Relay** side pane).
+- **`prepare_handoff`**: `{ conversationId?: string, nextAction?: string, hypothesis?: string, redlines?: string, launchNewConversation?: boolean, archiveSource?: boolean, title?: string }` (builds a `<2.5k`-token deterministic Clean-Slate Session Relay brief inheriting all `shadowId`s, and optionally launches a fresh conversation when >180k–220k tokens).
