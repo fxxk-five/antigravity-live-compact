@@ -1,8 +1,6 @@
 # Antigravity Live Compact (`live-compact`)
 
-面向 **Google Antigravity（App / CLI / IDE）** 的确定性、零额外模型开销的**入站防洪闸 + 跨池无损热交接（Clean-Slate Session Relay）**插件：
-1. **入站零前缀改写压缩（Zero-Mutation Spine Gate）**：在冗长的测试/构建日志与超大文件切片进入上下文之前，于本地压缩为高信息密度的 **Spine Card**，同时以 Fail-Closed 方式原子落盘 **Shadow 原文备份**；常规短命令与窄源码编辑读取 100% 零包装直通，锁死 95%+ KV Prefix Cache 命中率。
-2. **180k–220k 拐点跨池无损热交接（Clean-Slate Relay + MCP App 侧栏面板）**：毫秒级扫描对话轨迹定位上下文膨胀病灶（`context_doctor`），通过「100% 确定性工程台账 + 3 槽轻量语义填空」（`prepare_handoff`）将 300k–500k 臃肿会话压成 `<2.5k tokens` 的精确接力契约，支持在右侧栏 **Live Compact Relay** 面板一键拉起同项目干净新会话并**跨会话继承全部历史 `shadowId` 冷记忆**，让单轮响应耗时从 ~70s 直接回到 ~15s 且换池不失忆。
+面向 **Google Antigravity（App / CLI / IDE）** 的确定性、零额外模型开销的上下文在线压缩插件：在冗长的终端命令输出和大日志读取进入对话上下文之前，于本地压缩为高信息密度的 **Spine Card**，同时以 Fail-Closed 方式落盘 SHA256 校验的 **Shadow 原文备份**，并内置本地 MCP Server 支持按需精准检索原文细节。
 
 > [!IMPORTANT]
 > **适用范围声明**：本项目**仅针对 Google Antigravity（App / CLI / IDE）**，**并非 DSH 插件**。  
@@ -84,7 +82,7 @@ git clone https://github.com/fxxk-five/antigravity-live-compact.git ./.agents/pl
 
 ## 验证安装与日常管理
 
-安装完成后，可执行以下命令验证插件结构与 24 项内置门禁测试：
+安装完成后，可执行以下命令验证插件结构与 22 项内置门禁测试：
 
 ```powershell
 # Windows (PowerShell)
@@ -103,7 +101,7 @@ node ~/.gemini/config/plugins/live-compact/scripts/self-test.mjs
 预期输出：
 - `agy plugin list` 显示 `live-compact` 已启用
 - `agy plugin validate --strict` 通过（`skills 1, rules 1, hooks 1, mcpServers 1`）
-- `self-test.mjs` 输出 `ALL 24 LIVE-COMPACT GATE TESTS PASSED!`
+- `self-test.mjs` 输出 `ALL 22 LIVE-COMPACT GATE TESTS PASSED!`
 
 > [!TIP]
 > 在 Antigravity App 新建一个对话并发送“查看当前 Live Compact 统计信息”，如果能正常调用 `shadow_stats` 返回会话统计，即说明 Hooks 与 MCP 均已完整生效（已打开的旧对话建议新开对话或刷新后使用）。
@@ -178,18 +176,15 @@ antigravity-live-compact/
 ├── mcp_config.json             # 本地 Shadow MCP Server 配置
 ├── rules/AGENTS.md             # 指导 Agent 正确对待 Spine Card 与按需调用 shadow 工具
 ├── skills/live-compact/SKILL.md # 查看统计与阈值的内置 Skill
-├── assets/
-│   ├── logo.svg                # 插件图标
-│   └── relay-app.html          # 内置单文件零依赖 MCP App 侧栏/内联交互面板
+├── assets/logo.svg             # 插件图标
 └── scripts/
-    ├── hook-dispatch.mjs       # 统一 Hook 分发器（智能白名单分流与大切片拦截）
+    ├── hook-dispatch.mjs       # 统一 Hook 分发器（含增量水位监控与过期临时文件清理）
     ├── live-compact-exec.mjs   # 跨平台命令执行包装器（Windows UTF-8 .ps1 / Unix /bin/sh）
-    ├── plan.mjs                # Spine Card 确定性压缩规划器与高噪音命令分类器
-    ├── relay.mjs               # Context Doctor 毫秒级体检引擎与 Clean-Slate 热交接协议
-    ├── shadow.mjs              # Fail-Closed 原子落盘、SHA256 校验与跨会话索引检索
-    ├── mcp-server.mjs          # 零依赖 Stdio MCP Server + MCP App UI Host
+    ├── plan.mjs                # Spine Card 确定性压缩规划器与信号提取器
+    ├── shadow.mjs              # Fail-Closed 原子落盘、SHA256 校验与索引检索
+    ├── mcp-server.mjs          # 零依赖 Stdio MCP Server (shadow_search/read/stats)
     ├── update-check.mjs        # 后台非阻塞版本检查、SessionStart 升级提示与 --apply 一键升级
-    └── self-test.mjs           # 24 项端到端门禁自测
+    └── self-test.mjs           # 22 项端到端门禁自测
 ```
 
 ## 环境变量调优
