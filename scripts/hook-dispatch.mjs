@@ -22,7 +22,7 @@ import {
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSpineCard, readConfig, shouldWrapCommand } from "./plan.mjs";
-import { recordCutStats, saveShadowBackup, sessionShadowDir, shadowRootDir } from "./shadow.mjs";
+import { planShadowIdentity, recordCutStats, saveShadowBackup, sessionShadowDir, shadowRootDir } from "./shadow.mjs";
 import { evaluateUpdateNotice } from "./update-check.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -34,13 +34,15 @@ const BINARY_EXTS = new Set([
   ".so", ".dylib", ".mp3", ".wav", ".mp4", ".mov", ".avi", ".mkv", ".woff", ".woff2", ".ttf",
 ]);
 
+const DOC_EXTS = new Set([".md", ".mdx", ".txt", ".rst"]);
+
 const CODE_EXTS = new Set([
   ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".py", ".go", ".rs", ".java",
   ".kt", ".swift", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php",
   ".css", ".scss", ".sass", ".less", ".styl", ".pcss",
   ".html", ".htm", ".vue", ".svelte", ".astro", ".pug", ".ejs", ".hbs",
   ".wxml", ".wxss", ".wxs", ".ux", ".swan", ".ttml", ".ttss", ".axml", ".acss",
-  ".md", ".mdx", ".yaml", ".yml", ".toml", ".ini", ".xml", ".plist",
+  ".yaml", ".yml", ".toml", ".ini", ".xml", ".plist",
   ".sql", ".graphql", ".gql", ".proto", ".tf", ".tfvars", ".hcl",
   ".gradle", ".cmake", ".dart", ".lua", ".scala", ".ex", ".exs", ".zig",
   ".ps1", ".sh", ".bash", ".zsh", ".bat", ".cmd",
@@ -122,13 +124,12 @@ function handleReadFile(payload, config) {
     return { decision: "allow" };
   }
 
-  // Respect explicit byte pagination or narrow line-range surgical reads (e.g. for editing or recall).
+  // Respect explicit byte pagination.
   if (Number(args.ByteOffset) > 0) return { decision: "allow" };
   const hasStart = Number.isInteger(args.StartLine) && args.StartLine >= 1;
   const hasEnd = Number.isInteger(args.EndLine) && args.EndLine >= 1;
-  if (hasStart && hasEnd && (args.EndLine - args.StartLine + 1) <= config.maxBoundedReadLines) {
-    return { decision: "allow" };
-  }
+  const isNarrowLineBound =
+    hasStart && hasEnd && (args.EndLine - args.StartLine + 1) <= config.maxBoundedReadLines;
 
   const ext = extname(absPath).toLowerCase();
   if (BINARY_EXTS.has(ext)) return { decision: "allow" };
@@ -143,11 +144,37 @@ function handleReadFile(payload, config) {
   if (!st.isFile()) return { decision: "allow" };
 
   const isCode = CODE_EXTS.has(ext);
+  const isDoc = DOC_EXTS.has(ext);
   const isJson = ext === ".json";
-  const minBytes = isCode ? config.codeMinBytes : isJson ? config.jsonMinBytes : config.logMinBytes;
-  const minLines = isCode ? config.codeMinLines : isJson ? config.jsonMinLines : config.logMinLines;
+  const minBytes = isCode
+    ? config.codeMinBytes
+    : isJson
+      ? config.jsonMinBytes
+      : isDoc
+        ? config.docMinBytes
+        : config.logMinBytes;
+  const minLines = isCode
+    ? config.codeMinLines
+    : isJson
+      ? config.jsonMinLines
+      : isDoc
+        ? config.docMinLines
+        : config.logMinLines;
+  const boundedByteCap = isCode
+    ? (config.maxBoundedCodeBytes || 24576)
+    : (config.maxBoundedLogBytes || 14336);
+
+  // Fast path: narrow bounded reads on files smaller than the bounded byte cap never need reading.
+  if (isNarrowLineBound && st.size <= boundedByteCap) {
+    return { decision: "allow" };
+  }
+
   // Cap huge files at 16MB for synchronous hook read safety.
-  if (st.size < minBytes || st.size > 16 * 1024 * 1024) {
+  if (st.size > 16 * 1024 * 1024) {
+    return { decision: "allow" };
+  }
+  // Allow files smaller than category minBytes unless a non-code dense log/jsonl exceeds boundedByteCap.
+  if (st.size < minBytes && (isCode || isJson || isDoc || st.size <= boundedByteCap)) {
     return { decision: "allow" };
   }
 
@@ -161,19 +188,51 @@ function handleReadFile(payload, config) {
   if (content.includes("\u0000")) return { decision: "allow" };
 
   const allLines = content.replace(/\r\n/g, "\n").split("\n");
-  if (allLines.length < minLines) return { decision: "allow" };
+  const isDenseOversizedFile = st.size >= Math.max(minBytes, boundedByteCap * 2);
+  if (allLines.length < minLines && !isDenseOversizedFile && (isCode || isJson || isDoc)) {
+    return { decision: "allow" };
+  }
 
-  // If caller asked for a large explicit range (e.g. StartLine=1, EndLine=800), slice to that range.
+  // Slice to requested range when StartLine/EndLine are provided.
   let targetText = content;
   if (hasStart || hasEnd) {
     const s = hasStart ? Math.max(1, args.StartLine) : 1;
     const e = hasEnd ? Math.min(allLines.length, args.EndLine) : allLines.length;
-    if (e - s + 1 < minLines) return { decision: "allow" };
+    if (e < s) return { decision: "allow" };
+    const span = e - s + 1;
     targetText = allLines.slice(s - 1, e).join("\n");
+    const sliceBytes = Buffer.byteLength(targetText, "utf8");
+    // Surgical bounded reads (<=250 lines) pass through raw as long as slice bytes stay within boundedByteCap.
+    if (span <= config.maxBoundedReadLines && sliceBytes <= boundedByteCap) {
+      return { decision: "allow" };
+    }
+    // Wide ranged reads (e.g. StartLine=1, EndLine=800 on giant files) require at least boundedByteCap in the slice.
+    if (sliceBytes <= boundedByteCap) {
+      return { decision: "allow" };
+    }
+  } else if (allLines.length < minLines && Buffer.byteLength(targetText, "utf8") <= boundedByteCap) {
+    return { decision: "allow" };
   }
 
   const convId = payload.conversationId || "default";
   const callId = payload?.toolCall?.id || `read_${randomBytes(6).toString("hex")}`;
+  const identity = planShadowIdentity(callId, targetText);
+
+  const built = buildSpineCard({
+    text: targetText,
+    sourceType: "file",
+    sourceLabel: absPath,
+    originalPath: absPath,
+    exitCode: 0,
+    isError: false,
+    shadowId: identity.shadowId,
+    conversationId: convId,
+    sha256: identity.sha256,
+    bytes: identity.bytes,
+    config,
+  });
+  // Evaluate net savings in memory BEFORE writing shadow files so uncompacted reads leave zero orphan files.
+  if (!built.compacted) return { decision: "allow" };
 
   const backup = saveShadowBackup({
     root,
@@ -186,23 +245,9 @@ function handleReadFile(payload, config) {
     exitCode: 0,
     rawText: targetText,
     maxBytes: config.shadowMaxBytes,
+    identity,
   });
   if (!backup.ok) return { decision: "allow" };
-
-  const built = buildSpineCard({
-    text: targetText,
-    sourceType: "file",
-    sourceLabel: absPath,
-    originalPath: absPath,
-    exitCode: 0,
-    isError: false,
-    shadowId: backup.shadowId,
-    conversationId: convId,
-    sha256: backup.sha256,
-    bytes: backup.bytes,
-    config,
-  });
-  if (!built.compacted) return { decision: "allow" };
 
   const cardPath = join(backup.dir, `card-${backup.shadowId}.txt`);
   writeFileSync(cardPath, `${built.card}\n`, "utf8");

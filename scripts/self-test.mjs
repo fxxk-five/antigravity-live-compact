@@ -525,6 +525,91 @@ try {
     "AGY_LIVE_COMPACT_CMD_EXTRA_REGEX must opt-in custom noisy commands",
   );
 
+  // 22. v1.4.0 fixes: StartLine=1..800 giant source compacts, dense <=250-line JSONL compacts, large .md compacts, <=32KB JSON command passes through with zero orphan shadow files, and AGENTS.md inlines MCP schemas
+  const hookGiant800 = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({
+      hookEventName: "PreToolUse",
+      conversationId: "conv-v140",
+      toolCall: { id: "c_g800", name: "read_file", args: { Path: giantSrc, StartLine: 1, EndLine: 800 } },
+    }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
+  });
+  assert.ok(
+    JSON.parse(hookGiant800.stdout).overwrite?.Path?.includes("card-raw-"),
+    "StartLine=1..800 on giant >=80KB source must compact (fixes 800 < 1500 bug)",
+  );
+
+  const denseJsonl = join(workDir, "dense-transcript.jsonl");
+  writeFileSync(
+    denseJsonl,
+    Array.from({ length: 60 }, (_, i) => JSON.stringify({ step: i + 1, type: "GENERIC", payload: "x".repeat(620) }) + "\n").join(""),
+    "utf8",
+  );
+  const hookDenseBounded = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({
+      hookEventName: "PreToolUse",
+      conversationId: "conv-v140",
+      toolCall: { id: "c_dense", name: "read_file", args: { Path: denseJsonl, StartLine: 1, EndLine: 60 } },
+    }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
+  });
+  assert.ok(
+    JSON.parse(hookDenseBounded.stdout).overwrite?.Path?.includes("card-raw-"),
+    "60-line ~38KB dense .jsonl bounded read must compact instead of leaking 45KB",
+  );
+
+  const bigDoc = join(workDir, "architecture-archive.md");
+  writeFileSync(
+    bigDoc,
+    Array.from({ length: 520 }, (_, i) => `## Section ${i + 1}\nDetailed specification notes for slice WI-${1000 + i} covering protocol invariants and acceptance checks.\n`).join(""),
+    "utf8",
+  );
+  const hookBigDoc = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({
+      hookEventName: "PreToolUse",
+      conversationId: "conv-v140",
+      toolCall: { id: "c_doc", name: "read_file", args: { Path: bigDoc } },
+    }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
+  });
+  assert.ok(JSON.parse(hookBigDoc.stdout).overwrite?.Path?.includes("card-raw-"), "unbounded >=28KB / >=400-line .md doc must compact");
+
+  const structuredJsonOut = JSON.stringify(
+    { items: Array.from({ length: 280 }, (_, i) => ({ id: i + 1, name: `item_${i}`, status: "ACTIVE", region: "ap-east-1" })) },
+    null,
+    2,
+  );
+  assert.ok(structuredJsonOut.length > 18500 && structuredJsonOut.length < 32768, `json len=${structuredJsonOut.length}`);
+  const structSpec = join(tmp, "spec-struct-json.json");
+  const jsonFile = join(workDir, "medium-api.json");
+  writeFileSync(jsonFile, structuredJsonOut, "utf8");
+  writeFileSync(
+    structSpec,
+    JSON.stringify({
+      cmd: process.platform === "win32" ? `Get-Content -Raw '${jsonFile.replace(/'/g, "''")}'` : `cat '${jsonFile}'`,
+      convId: "conv-zero-orphan",
+      callId: "call_struct_json",
+      shadowRoot: shadowDir,
+    }),
+    "utf8",
+  );
+  const structRes = spawnSync(process.execPath, [join(HERE, "live-compact-exec.mjs"), structSpec], {
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
+  });
+  assert.equal(structRes.status, 0);
+  assert.ok(!structRes.stdout.includes("[Live Compact · Spine Card]"), "<=32KB valid JSON command output must pass through verbatim");
+  assert.equal(existsSync(join(shadowDir, "conv-zero-orphan")), false, "uncompacted command must leave zero orphan shadow files");
+
+  const agentsRuleText = readFileSync(join(HERE, "..", "rules", "AGENTS.md"), "utf8");
+  assert.ok(
+    agentsRuleText.includes("shadow_search") && agentsRuleText.includes("shadow_read") && agentsRuleText.includes("shadow_stats"),
+    "rules/AGENTS.md must inline MCP tool schemas to avoid schema-read turns",
+  );
+
   const stats = readShadowStats({ root: tmp, conversationId: "conv-exec-1" });
   assert.equal(stats.sessionStats.cuts, 1);
   assert.ok(stats.updateStatus && typeof stats.updateStatus.currentVersion === "string");
@@ -532,7 +617,7 @@ try {
   assert.equal(isToolFailure("ok", false, 0), false);
   assert.equal(isToolFailure("ok", false, 1), true);
 
-  console.log("ALL 21 LIVE-COMPACT GATE TESTS PASSED!");
+  console.log("ALL 22 LIVE-COMPACT GATE TESTS PASSED!");
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

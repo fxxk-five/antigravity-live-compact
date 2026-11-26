@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { buildSpineCard, readConfig } from "./plan.mjs";
-import { recordCutStats, saveShadowBackup, shadowRootDir } from "./shadow.mjs";
+import { planShadowIdentity, recordCutStats, saveShadowBackup, shadowRootDir } from "./shadow.mjs";
 
 const MAX_CAPTURE_BYTES = 32 * 1024 * 1024;
 
@@ -210,7 +210,27 @@ async function main() {
     return;
   }
 
-  // Fail-closed: persist full shadow backup BEFORE attempting compaction.
+  // Evaluate Spine Card net savings in memory BEFORE writing shadow files so uncompacted commands write zero orphan files.
+  const identity = planShadowIdentity(callId, rawText);
+  const built = buildSpineCard({
+    text: rawText,
+    sourceType: "command",
+    sourceLabel: spec.cmd || "",
+    exitCode: result.exitCode,
+    isError: result.exitCode !== 0,
+    shadowId: identity.shadowId,
+    conversationId: convId,
+    sha256: identity.sha256,
+    bytes: identity.bytes,
+    config,
+  });
+
+  if (!built.compacted) {
+    emitVerbatim();
+    return;
+  }
+
+  // Fail-closed: persist full shadow backup atomically BEFORE emitting Spine Card.
   const backup = saveShadowBackup({
     root,
     conversationId: convId,
@@ -221,28 +241,11 @@ async function main() {
     exitCode: result.exitCode,
     rawText,
     maxBytes: config.shadowMaxBytes,
+    identity,
   });
 
   if (!backup.ok) {
     // Fail-closed: never discard data when backup fails.
-    emitVerbatim();
-    return;
-  }
-
-  const built = buildSpineCard({
-    text: rawText,
-    sourceType: "command",
-    sourceLabel: spec.cmd || "",
-    exitCode: result.exitCode,
-    isError: result.exitCode !== 0,
-    shadowId: backup.shadowId,
-    conversationId: convId,
-    sha256: backup.sha256,
-    bytes: backup.bytes,
-    config,
-  });
-
-  if (!built.compacted) {
     emitVerbatim();
     return;
   }

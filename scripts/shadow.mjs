@@ -55,6 +55,14 @@ export function makeShadowId(callId, contentSha256) {
   return `raw-${digest.slice(0, 16)}`;
 }
 
+export function planShadowIdentity(callId, rawText = "") {
+  const body = String(rawText ?? "");
+  const buf = Buffer.from(body, "utf8");
+  const sha256 = sha256Hex(buf);
+  const shadowId = makeShadowId(callId, sha256);
+  return { body, buf, bytes: buf.length, sha256, shadowId };
+}
+
 function atomicWrite(targetPath, data) {
   const tmpPath = `${targetPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   let fd;
@@ -123,14 +131,15 @@ export function saveShadowBackup({
   rawText = "",
   originalPath = "",
   maxBytes = DEFAULT_MAX_BYTES,
+  identity = null,
 }) {
   try {
     const dir = sessionShadowDir(root, conversationId);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const body = String(rawText ?? "");
-    const buf = Buffer.from(body, "utf8");
-    const sha256 = sha256Hex(buf);
-    const shadowId = makeShadowId(callId, sha256);
+    const planned = identity && identity.buf && identity.sha256 && identity.shadowId
+      ? identity
+      : planShadowIdentity(callId, rawText);
+    const { body, buf, sha256, shadowId } = planned;
     const filePath = join(dir, `${shadowId}.txt`);
     const metaPath = `${filePath}.meta.json`;
     const normalizedLines = body.replace(/\r\n/g, "\n").split("\n");

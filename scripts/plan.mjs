@@ -49,15 +49,20 @@ export function readConfig(env = process.env) {
     cmdExtraRegex,
     smallChars: num("AGY_LIVE_COMPACT_SMALL_CHARS", 18432, 256),
     smallLines: num("AGY_LIVE_COMPACT_SMALL_LINES", 240, 5),
+    structuredPassthroughChars: num("AGY_LIVE_COMPACT_STRUCTURED_CHARS", 32768, 2048),
     cardBudget: num("AGY_LIVE_COMPACT_CARD_BUDGET", 2800, 600),
     failureBudget: num("AGY_LIVE_COMPACT_FAILURE_BUDGET", 6400, 1200),
     logMinBytes: num("AGY_LIVE_COMPACT_LOG_MIN_BYTES", 16384, 512),
     logMinLines: num("AGY_LIVE_COMPACT_LOG_MIN_LINES", 240, 15),
+    docMinBytes: num("AGY_LIVE_COMPACT_DOC_MIN_BYTES", 28672, 2048),
+    docMinLines: num("AGY_LIVE_COMPACT_DOC_MIN_LINES", 400, 30),
     jsonMinBytes: num("AGY_LIVE_COMPACT_JSON_MIN_BYTES", 32768, 1024),
     jsonMinLines: num("AGY_LIVE_COMPACT_JSON_MIN_LINES", 400, 30),
     codeMinBytes: num("AGY_LIVE_COMPACT_CODE_MIN_BYTES", 81920, 4096),
     codeMinLines: num("AGY_LIVE_COMPACT_CODE_MIN_LINES", 1500, 100),
     maxBoundedReadLines: num("AGY_LIVE_COMPACT_MAX_BOUNDED_LINES", 250, 20),
+    maxBoundedCodeBytes: num("AGY_LIVE_COMPACT_MAX_BOUNDED_CODE_BYTES", 24576, 2048),
+    maxBoundedLogBytes: num("AGY_LIVE_COMPACT_MAX_BOUNDED_LOG_BYTES", 14336, 1024),
     watermarkTokens: num("AGY_LIVE_COMPACT_WATERMARK_TOKENS", 120000, 10000),
     shadowMaxBytes: num("AGY_LIVE_COMPACT_SHADOW_MAX_BYTES", 256 * 1024 * 1024, 1024 * 1024),
   });
@@ -317,6 +322,32 @@ function appendBudgetedSection(sections, title, items, seenLineNos, budgetState)
   }
 }
 
+function isStructuredDataOutput(normalized, lines) {
+  const trimmed = normalized.trim();
+  if (!trimmed) return false;
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    try {
+      JSON.parse(trimmed);
+      return true;
+    } catch {}
+  }
+  if (lines.length >= 6) {
+    let nonEmpty = 0;
+    let tableRows = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      const t = lines[i].trim();
+      if (!t) continue;
+      nonEmpty += 1;
+      if (TABLE_RE.test(t)) tableRows += 1;
+    }
+    if (nonEmpty >= 6 && tableRows / nonEmpty >= 0.45) return true;
+  }
+  return false;
+}
+
 /**
  * Decide whether to compact `text` and build a deterministic Spine Card.
  * Returns `{ compacted: false, reason }` if passthrough is better/safer, or
@@ -348,6 +379,16 @@ export function buildSpineCard({
 
   if (sourceType === "command" && (rawChars <= config.cardBudget || (rawChars <= config.smallChars && rawLines <= config.smallLines))) {
     return { compacted: false, reason: "small-output", failed, rawTokens };
+  }
+
+  // Avoid breaking moderate structured JSON / Markdown tables into Spine Cards (prevents costly shadow_read recall turns).
+  if (
+    sourceType === "command" &&
+    !failed &&
+    rawChars <= (config.structuredPassthroughChars || 32768) &&
+    isStructuredDataOutput(normalized, lines)
+  ) {
+    return { compacted: false, reason: "structured-within-budget", failed, rawTokens };
   }
 
   // On failure, preserve full diagnostic output verbatim whenever it fits inside failureBudget.
