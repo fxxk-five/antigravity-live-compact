@@ -14,6 +14,8 @@ Use the bundled `shadow` MCP server tools (`shadow_stats`, `shadow_search`, `sha
 2. When locating a specific detail in a compressed log or command output, call `shadow_search` with the `shadowId` and a focused keyword or regex pattern.
 3. Call `shadow_read` with bounded `startLine` and `endLine` (<= 150 lines) only when surrounding lines are needed.
 4. When the user asks to check or upgrade Live Compact, run `node "$env:USERPROFILE\.gemini\config\plugins\live-compact\scripts\update-check.mjs" --check` (or `--apply` to upgrade in place and run all gate tests).
+5. When the user triggers baton relay (`接力` / `relay`), pipe a concise JSON handoff payload (`{"title":"...","model":"pro","prompt":"..."}`) into `node "$HOME/.gemini/config/plugins/live-compact/scripts/relay-session.mjs"` to launch a fresh same-project conversation via local `ConversationService/CreateConversation`.
+6. Optional companion script for users who also install `agy-powertools`: `contrib/patch-powertools-drop.mjs` (`--apply` / `--check` / `--restore`, opt-in only, never run automatically) converts dropped/pasted non-image local files into lightweight `@file` mentions and sets a `256K` context checkpoint ceiling.
 
 ## Environment Knobs
 

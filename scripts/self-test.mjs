@@ -736,11 +736,26 @@ try {
     child.stdin.write(JSON.stringify({ hookEventName: "SessionStart", conversationId: "conv-open-stdin" }));
   });
 
+  // 28. v2.1.0: relay-session.mjs --self-test passes end-to-end and rules/AGENTS.md encodes subagent GC + baton relay
+  const relaySelfTest = spawnSync(process.execPath, [join(HERE, "relay-session.mjs"), "--self-test"], {
+    encoding: "utf8",
+  });
+  assert.equal(relaySelfTest.status, 0, `relay-session --self-test failed: ${relaySelfTest.stderr}`);
+  const relayOut = JSON.parse(relaySelfTest.stdout);
+  assert.equal(relayOut.ok, true);
+  assert.equal(relayOut.selfTest, "PASSED");
+  assert.ok(
+    agentsRuleText.includes("invoke_subagent") &&
+      agentsRuleText.includes("relay-session.mjs") &&
+      agentsRuleText.includes("CreateConversation"),
+    "rules/AGENTS.md must include subagent GC redlines and baton-relay instructions",
+  );
+
   assert.ok(estimateTokens("中文测试 hello world") > 0);
   assert.equal(isToolFailure("ok", false, 0), false);
   assert.equal(isToolFailure("ok", false, 1), true);
 
-  console.log("ALL 27 LIVE-COMPACT GATE TESTS PASSED!");
+  console.log("ALL 28 LIVE-COMPACT GATE TESTS PASSED!");
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

@@ -2,8 +2,8 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "live-compact",
   "displayName": "Live Compact",
-  "version": "2.0.2",
-  "description": "Deterministic in-flight context compaction for Google Antigravity: compresses verbose tool outputs and large log reads locally into Spine Cards with fail-closed shadow backups and on-demand MCP recall.",
+  "version": "2.1.0",
+  "description": "Low-watermark context defense for Google Antigravity: compresses verbose tool outputs into Spine Cards with Fail-Closed shadow backups, enforces Subagent Context GC redlines, and adds one-word Baton Relay (接力/relay) session handoff.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Show Live Compact stats and shadow backups for this session",

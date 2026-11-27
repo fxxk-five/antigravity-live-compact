@@ -414,6 +414,7 @@ const SYNC_ENTRIES = [
   "LICENSE",
   ".gitignore",
   "assets",
+  "contrib",
   "rules",
   "skills",
   "scripts",
