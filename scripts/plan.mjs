@@ -47,9 +47,9 @@ export function readConfig(env = process.env) {
     disabled: env.AGY_LIVE_COMPACT_DISABLED === "1",
     cmdMode,
     cmdExtraRegex,
-    smallChars: num("AGY_LIVE_COMPACT_SMALL_CHARS", 18432, 256),
-    smallLines: num("AGY_LIVE_COMPACT_SMALL_LINES", 240, 5),
-    structuredPassthroughChars: num("AGY_LIVE_COMPACT_STRUCTURED_CHARS", 32768, 2048),
+    smallChars: num("AGY_LIVE_COMPACT_SMALL_CHARS", 9800, 256),
+    smallLines: num("AGY_LIVE_COMPACT_SMALL_LINES", 180, 5),
+    structuredPassthroughChars: num("AGY_LIVE_COMPACT_STRUCTURED_CHARS", 9800, 2048),
     cardBudget: num("AGY_LIVE_COMPACT_CARD_BUDGET", 2800, 600),
     failureBudget: num("AGY_LIVE_COMPACT_FAILURE_BUDGET", 6400, 1200),
     logMinBytes: num("AGY_LIVE_COMPACT_LOG_MIN_BYTES", 16384, 512),
@@ -61,7 +61,9 @@ export function readConfig(env = process.env) {
     codeMinBytes: num("AGY_LIVE_COMPACT_CODE_MIN_BYTES", 81920, 4096),
     codeMinLines: num("AGY_LIVE_COMPACT_CODE_MIN_LINES", 1500, 100),
     maxBoundedReadLines: num("AGY_LIVE_COMPACT_MAX_BOUNDED_LINES", 250, 20),
-    maxBoundedCodeBytes: num("AGY_LIVE_COMPACT_MAX_BOUNDED_CODE_BYTES", 24576, 2048),
+    maxBoundedCodeBytes: num("AGY_LIVE_COMPACT_MAX_BOUNDED_CODE_BYTES", 36864, 2048),
+    maxBoundedDocBytes: num("AGY_LIVE_COMPACT_MAX_BOUNDED_DOC_BYTES", 36864, 2048),
+    maxBoundedJsonBytes: num("AGY_LIVE_COMPACT_MAX_BOUNDED_JSON_BYTES", 28672, 2048),
     maxBoundedLogBytes: num("AGY_LIVE_COMPACT_MAX_BOUNDED_LOG_BYTES", 14336, 1024),
     watermarkTokens: num("AGY_LIVE_COMPACT_WATERMARK_TOKENS", 120000, 10000),
     shadowMaxBytes: num("AGY_LIVE_COMPACT_SHADOW_MAX_BYTES", 256 * 1024 * 1024, 1024 * 1024),
@@ -69,7 +71,7 @@ export function readConfig(env = process.env) {
 }
 
 const HIGH_NOISE_CMD_RE =
-  /(?:^|[\s;|&`("'/\\])(?:pytest(?:\.exe)?|unittest|vitest|jest|mocha|ava|playwright|cypress|rspec|phpunit|ctest|go(?:\.exe)?\s+test|cargo(?:\.exe)?\s+(?:test|build|check|clippy|doc)|dotnet(?:\.exe)?\s+(?:test|build|publish|restore)|mvn(?:\.cmd)?\s+(?:test|verify|package|install|compile)|gradle(?:w|\.bat)?\s+(?:test|check|build|assemble)|node(?:\.exe)?\s+--test|(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?\s+(?:(?:--\S+\s+\S+|-[A-Za-z]\s+\S+)\s+)*(?:test|ci|install|pack|audit|outdated|build|run\s+(?:test|build|lint|check|verify|static|browser|self-test|e2e|typecheck)\b)|(?:pip|pip3|uv|poetry|conda)(?:\.exe)?\s+(?:install|sync|freeze|list)|(?:tsc|webpack|esbuild|rollup|turbo|nx|bazel|cmake|ninja)(?:\.cmd|\.exe)?(?:\s|$)|vite(?:\.cmd)?\s+build|next(?:\.cmd)?\s+build|nuxt(?:\.cmd)?\s+build|docker(?:\.exe)?\s+(?:build|buildx|compose|logs|pull|push)|kubectl(?:\.exe)?\s+logs|journalctl\b|(?:ruff|eslint|mypy|pyright|flake8|pylint|golangci-lint|biome)(?:\.cmd|\.exe)?(?:\s|$)|git(?:\.exe)?\s+grep\b|Get-ChildItem\b[^\r\n;|&]*-Recurse\b|dir\s+\/s\b|tree(?:\.com)?(?:\s|$))|(?:^|[\s;|&`(])make(?:\.exe)?(?:\s|$)|(?:^|[\s"'/\\-])(?:Start-DevStandalone|RebuildImage|self-test\.(?:m?js|ps1|sh)|run-all\.(?:m?js|py|ps1|sh)|emit-log\.)/i;
+  /(?:^|[\s;|&`("'/\\])(?:pytest(?:\.exe)?|unittest|vitest|jest|mocha|ava|playwright|cypress|rspec|phpunit|ctest|go(?:\.exe)?\s+test|cargo(?:\.exe)?\s+(?:test|build|check|clippy|doc)|dotnet(?:\.exe)?\s+(?:test|build|publish|restore)|mvn(?:\.cmd)?\s+(?:test|verify|package|install|compile)|gradle(?:w|\.bat)?\s+(?:test|check|build|assemble)|node(?:\.exe)?\s+--test|(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?\s+(?:(?:--\S+\s+\S+|-[A-Za-z]\s+\S+)\s+)*(?:test|ci|install|pack|audit|outdated|build|run\s+(?:test|build|lint|check|verify|static|browser|self-test|e2e|typecheck)\b)|(?:pip|pip3|uv|poetry|conda)(?:\.exe)?\s+(?:install|sync|freeze|list)|(?:tsc|webpack|esbuild|rollup|turbo|nx|bazel|cmake|ninja)(?:\.cmd|\.exe)?(?:\s|$)|vite(?:\.cmd)?\s+build|next(?:\.cmd)?\s+build|nuxt(?:\.cmd)?\s+build|docker(?:\.exe)?\s+(?:build|buildx|compose|logs|pull|push)|kubectl(?:\.exe)?\s+logs|journalctl\b|(?:ruff|eslint|mypy|pyright|flake8|pylint|golangci-lint|biome)(?:\.cmd|\.exe)?(?:\s|$)|git(?:\.exe)?\s+(?:grep\b|(?:diff|show)(?!\s+(?:--stat|--shortstat|--name-only|--name-status|--check|--exit-code)\b)\b)|(?:rg|Select-String)(?:\.exe)?(?:\s|$)|Get-ChildItem\b[^\r\n;|&]*-Recurse\b|dir\s+\/s\b|tree(?:\.com)?(?:\s|$))|(?:^|[\s;|&`(])make(?:\.exe)?(?:\s|$)|(?:^|[\s"'/\\-])(?:Start-DevStandalone|RebuildImage|self-test\.(?:m?js|ps1|sh)|run-all\.(?:m?js|py|ps1|sh)|emit-log\.)/i;
 
 const UNBOUNDED_LOG_DUMP_RE =
   /(?:^|[\s;|&`(])(?:Get-Content|cat|type)\b[^\r\n;|&]*\.(?:log|jsonl)\b/i;

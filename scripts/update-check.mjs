@@ -28,8 +28,8 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(HERE, "..");
-const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
-const RETRY_BACKOFF_MS = 60 * 60 * 1000; // 1 hour on transient network error
+const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const RETRY_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes on transient network error
 const DEFAULT_REPO = "fxxk-five/antigravity-live-compact";
 
 export function compareVersions(a, b) {
@@ -140,12 +140,75 @@ function summarizeReleaseBody(body) {
   return "";
 }
 
-export async function fetchLatestVersion({ repo = DEFAULT_REPO, currentVersion = "0.0.0", timeoutMs = 5000, fetcher = fetch } = {}) {
-  const ua = `antigravity-live-compact/${currentVersion}`;
-
-  // 1. Primary: GitHub Releases latest API
+function fetchJsonViaSystemProxy(url, ua, timeoutMs = 5000) {
+  const timeoutSec = Math.max(2, Math.ceil(timeoutMs / 1000));
+  const curlBin = process.platform === "win32" ? "curl.exe" : "curl";
   try {
-    const res = await fetcher(`https://api.github.com/repos/${repo}/releases/latest`, {
+    const res = spawnSync(
+      curlBin,
+      ["-fsSL", "--max-time", String(timeoutSec), "-H", `User-Agent: ${ua}`, "-H", "Accept: application/vnd.github+json", url],
+      { encoding: "utf8", timeout: timeoutMs + 1500, windowsHide: true },
+    );
+    if (res.status === 0 && res.stdout && res.stdout.trim()) {
+      return JSON.parse(res.stdout);
+    }
+  } catch {}
+
+  // On Windows, PowerShell Invoke-RestMethod honors WinINET / Clash system proxy even when HTTP_PROXY env vars are unset.
+  if (process.platform === "win32") {
+    try {
+      const psCmd =
+        "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; " +
+        "(Invoke-RestMethod -Uri $env:__LC_FETCH_URL -Headers @{'User-Agent'=$env:__LC_FETCH_UA;'Accept'='application/vnd.github+json'} -TimeoutSec " +
+        timeoutSec +
+        ") | ConvertTo-Json -Depth 5 -Compress";
+      const res = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCmd], {
+        encoding: "utf8",
+        timeout: timeoutMs + 3000,
+        windowsHide: true,
+        env: { ...process.env, __LC_FETCH_URL: url, __LC_FETCH_UA: ua },
+      });
+      if (res.status === 0 && res.stdout && res.stdout.trim()) {
+        return JSON.parse(res.stdout);
+      }
+    } catch {}
+  }
+  return null;
+}
+
+export async function fetchLatestVersion({ repo = DEFAULT_REPO, currentVersion = "0.0.0", timeoutMs = 5000, fetcher = fetch, allowShellFallback = fetcher === fetch } = {}) {
+  const ua = `antigravity-live-compact/${currentVersion}`;
+  const releaseApiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
+  const rawManifestUrl = `https://raw.githubusercontent.com/${repo}/main/plugin.json`;
+
+  const parseRelease = (rel) => {
+    if (!rel || rel.draft || rel.prerelease || typeof rel.tag_name !== "string") return null;
+    const version = rel.tag_name.replace(/^v/i, "").trim();
+    if (compareVersions(version, "0.0.0") === null) return null;
+    return {
+      ok: true,
+      source: "github-release",
+      latestVersion: version,
+      releaseUrl: rel.html_url || `https://github.com/${repo}/releases/tag/${encodeURIComponent(rel.tag_name)}`,
+      summary: summarizeReleaseBody(rel.body),
+    };
+  };
+
+  const parseManifest = (manifest) => {
+    const version = String(manifest?.version || "").replace(/^v/i, "").trim();
+    if (compareVersions(version, "0.0.0") === null) return null;
+    return {
+      ok: true,
+      source: "github-main-manifest",
+      latestVersion: version,
+      releaseUrl: `https://github.com/${repo}`,
+      summary: "",
+    };
+  };
+
+  // 1. Primary: GitHub Releases latest API via fetch
+  try {
+    const res = await fetcher(releaseApiUrl, {
       headers: {
         Accept: "application/vnd.github+json",
         "User-Agent": ua,
@@ -153,42 +216,32 @@ export async function fetchLatestVersion({ repo = DEFAULT_REPO, currentVersion =
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.ok) {
-      const rel = await res.json();
-      if (!rel?.draft && !rel?.prerelease && typeof rel?.tag_name === "string") {
-        const version = rel.tag_name.replace(/^v/i, "").trim();
-        if (compareVersions(version, "0.0.0") !== null) {
-          return {
-            ok: true,
-            source: "github-release",
-            latestVersion: version,
-            releaseUrl: rel.html_url || `https://github.com/${repo}/releases/tag/${encodeURIComponent(rel.tag_name)}`,
-            summary: summarizeReleaseBody(rel.body),
-          };
-        }
-      }
+      const parsed = parseRelease(await res.json());
+      if (parsed) return parsed;
     }
   } catch {}
 
-  // 2. Fallback: raw main plugin.json (works even before a GitHub Release is published)
+  // 2. Fallback: raw main plugin.json via fetch
   try {
-    const res = await fetcher(`https://raw.githubusercontent.com/${repo}/main/plugin.json`, {
+    const res = await fetcher(rawManifestUrl, {
       headers: { "User-Agent": ua },
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.ok) {
-      const manifest = await res.json();
-      const version = String(manifest?.version || "").replace(/^v/i, "").trim();
-      if (compareVersions(version, "0.0.0") !== null) {
-        return {
-          ok: true,
-          source: "github-main-manifest",
-          latestVersion: version,
-          releaseUrl: `https://github.com/${repo}`,
-          summary: "",
-        };
-      }
+      const parsed = parseManifest(await res.json());
+      if (parsed) return parsed;
     }
   } catch {}
+
+  // 3. Proxy-aware fallback (curl / Windows WinINET Invoke-RestMethod) when Node fetch cannot reach GitHub directly.
+  if (allowShellFallback) {
+    const rel = fetchJsonViaSystemProxy(releaseApiUrl, ua, timeoutMs);
+    const parsedRel = parseRelease(rel);
+    if (parsedRel) return parsedRel;
+    const manifest = fetchJsonViaSystemProxy(rawManifestUrl, ua, timeoutMs);
+    const parsedMan = parseManifest(manifest);
+    if (parsedMan) return parsedMan;
+  }
 
   return { ok: false, error: "network-unavailable" };
 }
@@ -218,7 +271,7 @@ function defaultSpawnRefresh(cachePath) {
   try {
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--refresh", cachePath], {
       cwd: PLUGIN_ROOT,
-      env: process.env,
+      env: { ...process.env, NODE_USE_ENV_PROXY: "1" },
       detached: true,
       stdio: "ignore",
       windowsHide: true,

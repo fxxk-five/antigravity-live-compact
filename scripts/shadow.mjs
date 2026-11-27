@@ -314,12 +314,15 @@ export function searchShadow({
   contextLines = 1,
   limit = 30,
   maxFileBytes = 8 * 1024 * 1024,
+  maxBytes = 8500,
 }) {
   if (typeof pattern !== "string" || pattern.length === 0) {
     throw new TypeError("searchShadow: pattern is required");
   }
   const safeLimit = Math.min(100, Math.max(1, Math.floor(Number(limit) || 30)));
   const safeCtx = Math.min(5, Math.max(0, Math.floor(Number(contextLines) || 0)));
+  const safeMaxBytes = Math.max(1024, Math.floor(Number(maxBytes) || 8500));
+  const contentBudget = Math.max(512, safeMaxBytes - 260);
   const matcher = regex ? new RegExp(pattern, ignoreCase ? "i" : "") : null;
   const needle = ignoreCase ? pattern.toLowerCase() : pattern;
 
@@ -343,6 +346,8 @@ export function searchShadow({
   let scanned = 0;
   let skipped = 0;
   let truncated = false;
+  let byteCapped = false;
+  let usedBytes = 0;
 
   for (const target of targets) {
     if (target.size > maxFileBytes) {
@@ -380,7 +385,14 @@ export function searchShadow({
           .slice(i + 1, Math.min(lines.length, i + 1 + safeCtx))
           .map((t, idx) => `L${i + 2 + idx}: ${clip(t)}`);
       }
+      const itemBytes = Buffer.byteLength(JSON.stringify(item, null, 2), "utf8") + 6;
+      if (matches.length > 0 && usedBytes + itemBytes > contentBudget) {
+        truncated = true;
+        byteCapped = true;
+        break;
+      }
       matches.push(item);
+      usedBytes += itemBytes;
       if (matches.length >= safeLimit) {
         truncated = true;
         break;
@@ -394,6 +406,7 @@ export function searchShadow({
     scanned,
     skipped,
     truncated,
+    byteCapped,
     totalMatches: matches.length,
     matches,
   };
@@ -405,6 +418,7 @@ export function readShadowLines({
   shadowId = "",
   startLine = 1,
   endLine = 80,
+  maxBytes = 8500,
 }) {
   const found = locateShadowFile({ root, conversationId, shadowId });
   if (!found) {
@@ -418,22 +432,39 @@ export function readShadowLines({
   const start = Math.max(1, Math.min(totalLines || 1, Math.floor(Number(startLine) || 1)));
   const requestedEnd = Math.max(start, Math.floor(Number(endLine) || start + 79));
   const cappedEnd = Math.min(totalLines, start + 149, requestedEnd);
+  const safeMaxBytes = Math.max(1024, Math.floor(Number(maxBytes) || 8500));
+  const contentBudget = Math.max(512, safeMaxBytes - 360);
 
   const slice = [];
+  let usedBytes = 0;
+  let actualEnd = start - 1;
+  let byteCapped = false;
   for (let ln = start; ln <= cappedEnd; ln += 1) {
     const raw = lines[ln - 1] ?? "";
-    slice.push(`L${ln}: ${raw.length > 500 ? `${raw.slice(0, 500)}…` : raw}`);
+    const formatted = `L${ln}: ${raw.length > 500 ? `${raw.slice(0, 500)}…` : raw}`;
+    const lineBytes = Buffer.byteLength(formatted, "utf8") + 1;
+    if (slice.length > 0 && usedBytes + lineBytes > contentBudget) {
+      byteCapped = true;
+      break;
+    }
+    slice.push(formatted);
+    usedBytes += lineBytes;
+    actualEnd = ln;
   }
+  if (actualEnd < start) actualEnd = start;
 
+  const hasMore = actualEnd < totalLines;
   return {
     ok: true,
     shadowId: found.shadowId,
     sourceLabel: found.meta?.sourceLabel || "",
     originalPath: found.meta?.originalPath || "",
     startLine: start,
-    endLine: cappedEnd,
+    endLine: actualEnd,
     totalLines,
-    hasMore: cappedEnd < totalLines,
+    hasMore,
+    byteCapped,
+    nextStartLine: hasMore ? actualEnd + 1 : null,
     content: slice.join("\n"),
   };
 }
@@ -510,13 +541,16 @@ export function readShadowStats({ root = shadowRootDir(), conversationId = "", t
     savedTokensEst: 0,
   };
 
-  let targetConv = conversationId ? sanitizeKey(conversationId) : "";
+  const requestedConv = conversationId ? sanitizeKey(conversationId) : "";
+  let targetConv = requestedConv;
   let targetDir = targetConv ? sessionShadowDir(root, targetConv) : "";
+  let isFallbackSession = false;
   if (!targetDir || !existsSync(targetDir)) {
     const latest = findLatestSessionDir(root);
     if (latest) {
       targetConv = latest.conversationId;
       targetDir = latest.dir;
+      isFallbackSession = !requestedConv || targetConv !== requestedConv;
     }
   }
 
@@ -555,6 +589,8 @@ export function readShadowStats({ root = shadowRootDir(), conversationId = "", t
     updateStatus: getCachedUpdateStatus(),
     globalStats,
     conversationId: targetConv || null,
+    requestedConversationId: requestedConv || null,
+    isFallbackSession,
     sessionStats,
     watermark,
     recentBackups: backups,

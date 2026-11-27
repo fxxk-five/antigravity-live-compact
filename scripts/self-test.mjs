@@ -3,7 +3,7 @@
  * Unit & integration gate for Antigravity Live Compact.
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -362,16 +362,26 @@ try {
     assert.notEqual(psErrRes.status, 0, "PowerShell non-terminating cmdlet error must preserve non-zero exit code");
   }
 
-  // 16. Moderate diagnostic script output (~14KB / 180 lines) passes through verbatim without recall round-trips
-  const probeOut = Array.from({ length: 180 }, (_, i) => `row_${String(i + 1).padStart(3, "0")}: status=ok path=sidecar/client/module_inspector_${i}.mjs latency=${10 + i}ms payload=ok`).join("\n");
-  assert.ok(probeOut.length > 13000 && probeOut.length < 18432, `len=${probeOut.length}`);
+  // 16. Output safely below host ~10.3KB truncation cliff (~8.5KB / 120 lines) passes through verbatim; ~12KB / 160 lines compacts to prevent host blind truncation
+  const probeOut = Array.from({ length: 120 }, (_, i) => `row_${String(i + 1).padStart(3, "0")}: status=ok path=sidecar/client/module_${i}.mjs latency=${10 + i}ms`).join("\n");
+  assert.ok(probeOut.length > 7000 && probeOut.length < 9800, `len=${probeOut.length}`);
   const probeBuilt = buildSpineCard({
     text: probeOut,
     sourceType: "command",
     sourceLabel: "node probe.mjs",
     exitCode: 0,
   });
-  assert.equal(probeBuilt.compacted, false, "14KB / 180-line diagnostic output must pass through verbatim");
+  assert.equal(probeBuilt.compacted, false, "8.5KB / 120-line diagnostic output must pass through verbatim");
+
+  const cliffOut = Array.from({ length: 160 }, (_, i) => `row_${String(i + 1).padStart(3, "0")}: status=ok path=sidecar/client/module_inspector_${i}.mjs latency=${10 + i}ms payload=ok`).join("\n");
+  assert.ok(cliffOut.length > 10500 && cliffOut.length < 18000, `cliffLen=${cliffOut.length}`);
+  const cliffBuilt = buildSpineCard({
+    text: cliffOut,
+    sourceType: "command",
+    sourceLabel: "rg -n module_inspector sidecar/",
+    exitCode: 0,
+  });
+  assert.equal(cliffBuilt.compacted, true, "12KB output above 9.8KB threshold must compact to avoid host 10.3KB blind truncation");
 
   // 17. Regular source files (<80KB / <1500 lines), output.txt (<16KB / <240 lines), and bounded reads (<=250 lines) pass through; giant source (>=80KB & >=1500 lines) compacts
   const normalSrc = join(workDir, "normal-module.mjs");
@@ -578,11 +588,11 @@ try {
   assert.ok(JSON.parse(hookBigDoc.stdout).overwrite?.Path?.includes("card-raw-"), "unbounded >=28KB / >=400-line .md doc must compact");
 
   const structuredJsonOut = JSON.stringify(
-    { items: Array.from({ length: 280 }, (_, i) => ({ id: i + 1, name: `item_${i}`, status: "ACTIVE", region: "ap-east-1" })) },
+    { items: Array.from({ length: 65 }, (_, i) => ({ id: i + 1, name: `item_${i}`, status: "ACTIVE", region: "ap-east-1" })) },
     null,
     2,
   );
-  assert.ok(structuredJsonOut.length > 18500 && structuredJsonOut.length < 32768, `json len=${structuredJsonOut.length}`);
+  assert.ok(structuredJsonOut.length > 4000 && structuredJsonOut.length < 9800, `json len=${structuredJsonOut.length}`);
   const structSpec = join(tmp, "spec-struct-json.json");
   const jsonFile = join(workDir, "medium-api.json");
   writeFileSync(jsonFile, structuredJsonOut, "utf8");
@@ -601,7 +611,7 @@ try {
     env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
   });
   assert.equal(structRes.status, 0);
-  assert.ok(!structRes.stdout.includes("[Live Compact · Spine Card]"), "<=32KB valid JSON command output must pass through verbatim");
+  assert.ok(!structRes.stdout.includes("[Live Compact · Spine Card]"), "<=9.8KB valid JSON command output must pass through verbatim");
   assert.equal(existsSync(join(shadowDir, "conv-zero-orphan")), false, "uncompacted command must leave zero orphan shadow files");
 
   const agentsRuleText = readFileSync(join(HERE, "..", "rules", "AGENTS.md"), "utf8");
@@ -610,14 +620,127 @@ try {
     "rules/AGENTS.md must inline MCP tool schemas to avoid schema-read turns",
   );
 
-  const stats = readShadowStats({ root: tmp, conversationId: "conv-exec-1" });
-  assert.equal(stats.sessionStats.cuts, 1);
-  assert.ok(stats.updateStatus && typeof stats.updateStatus.currentVersion === "string");
+  // 23. v2.0.2: Chinese UTF-8 Markdown bounded read (<=250 lines & <=36KB) passes through raw without double-trapping
+  const zhDoc = join(workDir, "current-status-zh.md");
+  writeFileSync(
+    zhDoc,
+    Array.from(
+      { length: 160 },
+      (_, i) => `| WI-${String(i + 1).padStart(4, "0")} | 已完成 | 前端质量门禁与真实案件双分辨率视觉验收记录条目说明文本内容对齐校验 |\n`,
+    ).join(""),
+    "utf8",
+  );
+  const zhDocBytes = Buffer.byteLength(readFileSync(zhDoc, "utf8"), "utf8");
+  assert.ok(zhDocBytes > 20000 && zhDocBytes < 36864, `zhDocBytes=${zhDocBytes}`);
+  const hookZhBounded = spawnSync(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+    input: JSON.stringify({
+      hookEventName: "PreToolUse",
+      conversationId: "conv-v202",
+      toolCall: { id: "c_zh_doc", name: "read_file", args: { Path: zhDoc, StartLine: 1, EndLine: 160 } },
+    }),
+    encoding: "utf8",
+    env: { ...process.env, AGY_LIVE_COMPACT_SHADOW_DIR: shadowDir },
+  });
+  assert.equal(JSON.parse(hookZhBounded.stdout).overwrite, undefined, "Chinese UTF-8 Markdown bounded read (<=250L & <=36KB) must pass through raw");
+
+  // 24. v2.0.2: shadow_read & shadow_search enforce <=8.5KB UTF-8 inline cap with nextStartLine to avoid MCP spill
+  const bigUnicodeLog = Array.from(
+    { length: 120 },
+    (_, i) => `条目 ${i + 1}: 详细生产排查诊断信息 needle_match payload=${"中文测试数据内容".repeat(12)}`,
+  ).join("\n");
+  const bigUniBackup = saveShadowBackup({
+    root: tmp,
+    conversationId: "conv-v202-cap",
+    toolName: "run_command",
+    callId: "call_uni_cap",
+    sourceType: "command",
+    sourceLabel: "cat unicode.log",
+    exitCode: 0,
+    rawText: bigUnicodeLog,
+  });
+  const cappedRead = readShadowLines({
+    root: tmp,
+    shadowId: bigUniBackup.shadowId,
+    startLine: 1,
+    endLine: 120,
+  });
+  assert.equal(cappedRead.ok, true);
+  assert.equal(cappedRead.byteCapped, true, "large unicode shadow_read must byte-cap to prevent MCP spill");
+  assert.ok(Buffer.byteLength(cappedRead.content, "utf8") <= 8500, "shadow_read content must stay <=8500 UTF-8 bytes");
+  assert.equal(cappedRead.nextStartLine, cappedRead.endLine + 1, "shadow_read must provide exact nextStartLine cursor");
+
+  const cappedSearch = searchShadow({
+    root: tmp,
+    shadowId: bigUniBackup.shadowId,
+    pattern: "needle_match",
+    limit: 100,
+    contextLines: 1,
+  });
+  assert.equal(cappedSearch.found, true);
+  assert.equal(cappedSearch.byteCapped, true, "large shadow_search must byte-cap to prevent MCP spill");
+  assert.ok(Buffer.byteLength(JSON.stringify(cappedSearch, null, 2), "utf8") <= 9000, "shadow_search JSON must stay safely below MCP spill cap");
+
+  // 25. v2.0.2: smart mode wraps rg, Select-String, git diff/show payloads while bypassing git diff --stat/--check and git show --stat
+  for (const noisyV202 of [
+    "rg -n \"TODO|FIXME\" backend/ sidecar/",
+    "Select-String -Path sidecar/client/*.mjs -Pattern \"fetchLegalJson\"",
+    "git diff sidecar/src/",
+    "git show a9abf0b",
+  ]) {
+    assert.equal(shouldWrapCommand(noisyV202, smartCfg), true, `v2.0.2 smart mode should wrap: ${noisyV202}`);
+  }
+  for (const quietV202 of [
+    "git diff --stat",
+    "git diff --name-only",
+    "git diff --check",
+    "git show --stat a9abf0b",
+  ]) {
+    assert.equal(shouldWrapCommand(quietV202, smartCfg), false, `v2.0.2 smart mode should bypass short stat/check: ${quietV202}`);
+  }
+
+  // 26. v2.0.2: readShadowStats reports isFallbackSession accurately
+  const exactStats = readShadowStats({ root: tmp, conversationId: "conv-exec-1" });
+  assert.equal(exactStats.sessionStats.cuts, 1);
+  assert.equal(exactStats.isFallbackSession, false, "matching session must report isFallbackSession=false");
+  const fallbackStats = readShadowStats({ root: tmp, conversationId: "conv-brand-new-empty" });
+  assert.equal(fallbackStats.isFallbackSession, true, "missing session falling back to latest must report isFallbackSession=true");
+  assert.equal(fallbackStats.requestedConversationId, "conv-brand-new-empty");
+  assert.ok(exactStats.updateStatus && typeof exactStats.updateStatus.currentVersion === "string");
+
+  // 27. v2.0.2: hook-dispatch resolves complete JSON stdin immediately even if host keeps stdin open without EOF
+  await new Promise((resolveDone, rejectDone) => {
+    const startedAt = Date.now();
+    const child = spawn(process.execPath, [join(HERE, "hook-dispatch.mjs")], {
+      env: { ...process.env, AGY_LIVE_COMPACT_UPDATE_CACHE: testCachePath },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d.toString("utf8"); });
+    const guard = setTimeout(() => {
+      try { child.kill(); } catch {}
+      rejectDone(new Error("hook-dispatch stalled waiting for stdin EOF"));
+    }, 3000);
+    child.on("close", (code) => {
+      clearTimeout(guard);
+      try {
+        assert.equal(code, 0);
+        const parsed = JSON.parse(out);
+        assert.ok(parsed.injectSteps?.[0]?.systemMessage?.metadata?.user_markdown?.includes("v9.9.9"));
+        assert.ok(Date.now() - startedAt < 2000, "hook-dispatch should exit well before idle timeout when JSON is complete");
+        resolveDone();
+      } catch (err) {
+        rejectDone(err);
+      }
+    });
+    // Intentionally write JSON WITHOUT calling child.stdin.end()
+    child.stdin.write(JSON.stringify({ hookEventName: "SessionStart", conversationId: "conv-open-stdin" }));
+  });
+
   assert.ok(estimateTokens("中文测试 hello world") > 0);
   assert.equal(isToolFailure("ok", false, 0), false);
   assert.equal(isToolFailure("ok", false, 1), true);
 
-  console.log("ALL 22 LIVE-COMPACT GATE TESTS PASSED!");
+  console.log("ALL 27 LIVE-COMPACT GATE TESTS PASSED!");
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

@@ -138,7 +138,10 @@ function handleToolCall(name, args = {}) {
         isError: true,
       };
     }
-    const header = `[Shadow Read] ${res.shadowId} | lines ${res.startLine}-${res.endLine} of ${res.totalLines}${res.hasMore ? " (more lines available)" : ""}\nSource: ${res.sourceLabel}`;
+    const moreHint = res.hasMore
+      ? ` (more lines available; nextStartLine=${res.nextStartLine}${res.byteCapped ? ", capped <=8.5KB inline" : ""})`
+      : "";
+    const header = `[Shadow Read] ${res.shadowId} | lines ${res.startLine}-${res.endLine} of ${res.totalLines}${moreHint}\nSource: ${res.sourceLabel}`;
     return {
       content: [{ type: "text", text: `${header}\n${res.content}` }],
     };

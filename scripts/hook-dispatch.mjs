@@ -62,12 +62,51 @@ function sweepStaleCmdSpecs(dir, nowMs = Date.now()) {
   } catch {}
 }
 
-function readStdin() {
+function readStdin(maxBytes = 256 * 1024, idleTimeoutMs = 1500) {
   return new Promise((resolvePromise) => {
     const chunks = [];
-    process.stdin.on("data", (chunk) => chunks.push(chunk));
-    process.stdin.on("end", () => resolvePromise(Buffer.concat(chunks).toString("utf8")));
-    process.stdin.on("error", () => resolvePromise(""));
+    let totalBytes = 0;
+    let settled = false;
+    let timer = null;
+
+    const done = (text) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      process.stdin.removeListener("data", onData);
+      process.stdin.removeListener("end", onEnd);
+      process.stdin.removeListener("error", onError);
+      try { process.stdin.pause(); } catch {}
+      try { process.stdin.unref(); } catch {}
+      resolvePromise(text);
+    };
+
+    const onData = (chunk) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buf.length;
+      if (totalBytes > maxBytes) {
+        done("");
+        return;
+      }
+      chunks.push(buf);
+      const text = Buffer.concat(chunks).toString("utf8");
+      const trimmed = text.trim();
+      // Return immediately once a complete JSON object arrives so hosts that keep stdin open never stall SessionStart/PreToolUse.
+      if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+        try {
+          JSON.parse(trimmed);
+          done(text);
+        } catch {}
+      }
+    };
+    const onEnd = () => done(Buffer.concat(chunks).toString("utf8"));
+    const onError = () => done("");
+
+    timer = setTimeout(() => done(Buffer.concat(chunks).toString("utf8")), idleTimeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+    process.stdin.on("data", onData);
+    process.stdin.on("end", onEnd);
+    process.stdin.on("error", onError);
   });
 }
 
@@ -161,8 +200,12 @@ function handleReadFile(payload, config) {
         ? config.docMinLines
         : config.logMinLines;
   const boundedByteCap = isCode
-    ? (config.maxBoundedCodeBytes || 24576)
-    : (config.maxBoundedLogBytes || 14336);
+    ? (config.maxBoundedCodeBytes || 36864)
+    : isDoc
+      ? (config.maxBoundedDocBytes || 36864)
+      : isJson
+        ? (config.maxBoundedJsonBytes || 28672)
+        : (config.maxBoundedLogBytes || 14336);
 
   // Fast path: narrow bounded reads on files smaller than the bounded byte cap never need reading.
   if (isNarrowLineBound && st.size <= boundedByteCap) {
@@ -488,40 +531,46 @@ async function main() {
   const config = readConfig();
   const event = payload.hookEventName || "";
 
+  const respond = (text) => {
+    process.stdout.write(text, () => {
+      process.exit(0);
+    });
+  };
+
   if (config.disabled) {
-    process.stdout.write(event === "PreToolUse" ? '{"decision":"allow"}' : "{}");
+    respond(event === "PreToolUse" ? '{"decision":"allow"}' : "{}");
     return;
   }
 
   try {
     if (event === "SessionStart") {
-      process.stdout.write(JSON.stringify(handleSessionStart(payload, config)));
+      respond(JSON.stringify(handleSessionStart(payload, config)));
       return;
     }
 
     if (event === "PreToolUse") {
       const name = payload?.toolCall?.name || "";
       if (name === "run_command") {
-        process.stdout.write(JSON.stringify(handleRunCommand(payload, config)));
+        respond(JSON.stringify(handleRunCommand(payload, config)));
         return;
       }
       if (name === "read_file") {
-        process.stdout.write(JSON.stringify(handleReadFile(payload, config)));
+        respond(JSON.stringify(handleReadFile(payload, config)));
         return;
       }
-      process.stdout.write('{"decision":"allow"}');
+      respond('{"decision":"allow"}');
       return;
     }
 
     if (event === "PreInvocation") {
-      process.stdout.write(JSON.stringify(handlePreInvocation(payload, config)));
+      respond(JSON.stringify(handlePreInvocation(payload, config)));
       return;
     }
 
-    process.stdout.write("{}");
+    respond("{}");
   } catch {
     // Fail-open on hook internal error so agent execution is never blocked.
-    process.stdout.write(event === "PreToolUse" ? '{"decision":"allow"}' : "{}");
+    respond(event === "PreToolUse" ? '{"decision":"allow"}' : "{}");
   }
 }
 
